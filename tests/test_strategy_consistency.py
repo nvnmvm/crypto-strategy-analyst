@@ -35,5 +35,9 @@ def test_realtime_and_backtest_use_identical_evaluation(market_frames):
     assert realtime_report.stop_loss == (decision.stop_loss or "not_available")
     assert realtime_report.take_profit_1 == (decision.take_profit_1 or "not_available")
     assert realtime_report.take_profit_2 == (decision.take_profit_2 or "not_available")
+    assert realtime_report.support_zones == replay_evaluation.supports
+    assert realtime_report.resistance_zones == replay_evaluation.resistances
     assert realtime_report.daily_trend == replay_evaluation.trends["1d"]
     assert realtime_report.four_hour_trend == replay_evaluation.trends["4h"]
+    assert realtime_report.one_hour_trend == replay_evaluation.trends["1h"]
+    assert realtime_report.evaluation_time == replay_evaluation.evaluation_time

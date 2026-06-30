@@ -39,7 +39,7 @@ def normalize_symbol(symbol: str) -> str:
 
     cleaned = symbol.strip().upper().replace("-", "/")
     if cleaned not in {"BTC/USDT", "ETH/USDT"}:
-        raise MarketDataError("v0.1.0 supports only BTC/USDT and ETH/USDT")
+        raise MarketDataError("v0.1.1 supports only BTC/USDT and ETH/USDT")
     return cleaned.replace("/", "")
 
 

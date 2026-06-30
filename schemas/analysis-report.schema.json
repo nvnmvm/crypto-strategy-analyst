@@ -332,7 +332,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "default": "1.0.0",
+      "default": "1.1.0",
       "title": "Schema Version",
       "type": "string"
     },
@@ -340,6 +340,34 @@
       "format": "date-time",
       "title": "Generated At",
       "type": "string"
+    },
+    "requested_at": {
+      "format": "date-time",
+      "title": "Requested At",
+      "type": "string"
+    },
+    "evaluation_time": {
+      "format": "date-time",
+      "title": "Evaluation Time",
+      "type": "string"
+    },
+    "evaluation_timeframe": {
+      "const": "4h",
+      "default": "4h",
+      "title": "Evaluation Timeframe",
+      "type": "string"
+    },
+    "time_alignment_applied": {
+      "title": "Time Alignment Applied",
+      "type": "boolean"
+    },
+    "latest_completed_candle_close": {
+      "additionalProperties": {
+        "format": "date-time",
+        "type": "string"
+      },
+      "title": "Latest Completed Candle Close",
+      "type": "object"
     },
     "symbol": {
       "title": "Symbol",
@@ -367,6 +395,18 @@
       "title": "Current Price",
       "type": "number"
     },
+    "account_equity_cny": {
+      "minimum": 0,
+      "title": "Account Equity Cny",
+      "type": "number"
+    },
+    "risk_locks": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Risk Locks",
+      "type": "array"
+    },
     "data_quality": {
       "additionalProperties": {
         "$ref": "#/$defs/DataQuality"
@@ -378,6 +418,9 @@
       "$ref": "#/$defs/Trend"
     },
     "four_hour_trend": {
+      "$ref": "#/$defs/Trend"
+    },
+    "one_hour_trend": {
       "$ref": "#/$defs/Trend"
     },
     "one_hour_confirmation": {
@@ -542,13 +585,20 @@
   },
   "required": [
     "generated_at",
+    "requested_at",
+    "evaluation_time",
+    "time_alignment_applied",
+    "latest_completed_candle_close",
     "symbol",
     "data_source",
     "analysis_timeframes",
     "current_price",
+    "account_equity_cny",
+    "risk_locks",
     "data_quality",
     "daily_trend",
     "four_hour_trend",
+    "one_hour_trend",
     "one_hour_confirmation",
     "support_zones",
     "resistance_zones",

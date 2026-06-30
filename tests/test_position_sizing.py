@@ -22,6 +22,18 @@ def test_position_is_capped_by_available_equity():
     assert result.risk_amount_cny == 2.5
 
 
+def test_position_can_use_persisted_current_equity_instead_of_config_default():
+    config = RiskConfig(account_equity_cny=1000, risk_per_trade=0.01)
+    result = calculate_position(
+        entry_price=100,
+        stop_price=95,
+        config=config,
+        account_equity_cny=500,
+    )
+    assert result.position_notional_cny == 100
+    assert result.risk_amount_cny == 5
+
+
 def test_risk_above_three_percent_is_rejected():
     with pytest.raises(ValidationError):
         RiskConfig(risk_per_trade=0.031)

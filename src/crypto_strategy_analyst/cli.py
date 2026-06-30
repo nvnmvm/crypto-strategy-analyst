@@ -20,7 +20,7 @@ from .indicators import add_indicators
 from .levels import detect_zones
 from .logging_utils import configure_logging
 from .report import find_latest, save_analysis, save_backtest
-from .risk import RiskStateStore, calculate_position
+from .risk import RiskStateStore, calculate_position, risk_status
 from .structure import classify_trend, detect_confirmed_swings
 
 
@@ -39,6 +39,11 @@ def _json_print(payload: object) -> None:
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help="YAML override file")
+
+
+def _add_risk_state(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--risk-state", help="Persistent risk-state JSON path")
+    _add_common(parser)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +101,32 @@ def build_parser() -> argparse.ArgumentParser:
     position.add_argument("--stop", type=float, required=True)
     _add_common(position)
 
+    risk = subparsers.add_parser("risk", help="Manage persistent account risk state")
+    risk_commands = risk.add_subparsers(dest="risk_command", required=True)
+
+    risk_status_parser = risk_commands.add_parser("status", help="Show risk state and locks")
+    _add_risk_state(risk_status_parser)
+
+    initialize = risk_commands.add_parser("initialize", help="Create the first risk state")
+    initialize.add_argument("--equity-cny", type=float, required=True)
+    initialize.add_argument("--force", action="store_true")
+    _add_risk_state(initialize)
+
+    update_equity = risk_commands.add_parser("update-equity", help="Set current account equity")
+    update_equity.add_argument("--equity-cny", type=float, required=True)
+    _add_risk_state(update_equity)
+
+    record_trade = risk_commands.add_parser("record-trade", help="Record realized trade PnL")
+    record_trade.add_argument("--pnl-cny", type=float, required=True)
+    record_trade.add_argument("--stopped-out", action="store_true")
+    _add_risk_state(record_trade)
+
+    reset_daily = risk_commands.add_parser(
+        "reset-daily",
+        help="Manually clear only today's counters",
+    )
+    _add_risk_state(reset_daily)
+
     latest = subparsers.add_parser("latest", help="Print the latest saved Markdown report path")
     latest.add_argument("--output-dir", default="outputs")
     latest.add_argument("--symbol")
@@ -114,21 +145,85 @@ def execute(args: argparse.Namespace) -> int:
     config = _config(args)
     configure_logging(config.output.log_dir)
     output_dir = getattr(args, "output_dir", None) or config.output.output_dir
+    current_date = datetime.now(UTC).date()
+
+    if args.command == "risk":
+        store = RiskStateStore(args.risk_state or config.output.risk_state_file)
+        if args.risk_command == "initialize":
+            state = store.initialize(
+                current_date=current_date,
+                equity_cny=args.equity_cny,
+                force=args.force,
+            )
+            payload = risk_status(config.risk, state)
+            payload["risk_state"] = str(store.path)
+            if args.force:
+                payload["warning"] = "已强制覆盖原风险状态；历史风控数据已被替换。"
+            _json_print(payload)
+            return 0
+        if args.risk_command == "status":
+            state = store.load_existing(
+                current_date=current_date,
+                initial_equity_cny=config.risk.account_equity_cny,
+            )
+            _json_print(risk_status(config.risk, state))
+            return 0
+        if args.risk_command == "update-equity":
+            state = store.update_equity(
+                current_date=current_date,
+                initial_equity_cny=config.risk.account_equity_cny,
+                equity_cny=args.equity_cny,
+            )
+            payload = risk_status(config.risk, state)
+            payload["operation"] = "update_equity"
+            _json_print(payload)
+            return 0
+        if args.risk_command == "record-trade":
+            state = store.record_trade(
+                current_date=current_date,
+                initial_equity_cny=config.risk.account_equity_cny,
+                pnl_cny=args.pnl_cny,
+                stopped_out=args.stopped_out,
+            )
+            payload = risk_status(config.risk, state)
+            payload["operation"] = "record_trade"
+            payload["equity_rule"] = "new_equity = previous_equity + pnl_cny"
+            _json_print(payload)
+            return 0
+        if args.risk_command == "reset-daily":
+            state = store.reset_daily(
+                current_date=current_date,
+                initial_equity_cny=config.risk.account_equity_cny,
+            )
+            payload = risk_status(config.risk, state)
+            payload["warning"] = "已人工重置每日风控计数；仅用于纠错和测试。"
+            _json_print(payload)
+            return 0
+
     client = BinancePublicClient(config.market)
 
     if args.command == "analyze":
         risk_store = RiskStateStore(args.risk_state or config.output.risk_state_file)
-        risk_state = risk_store.load(
-            current_date=datetime.now(UTC).date(),
+        risk_state, initialized = risk_store.load_or_initialize(
+            current_date=current_date,
             initial_equity_cny=config.risk.account_equity_cny,
-        ).with_equity(config.risk.account_equity_cny)
-        report = analyze_symbol(args.symbol, config, client=client, risk_state=risk_state)
-        risk_store.save(risk_state)
+        )
+        report = analyze_symbol(
+            args.symbol,
+            config,
+            client=client,
+            risk_state=risk_state,
+            risk_state_initialized=initialized,
+        )
         json_path, markdown_path = save_analysis(report, output_dir)
         _json_print(
             {
                 "signal": report.signal,
                 "score": report.signal_score,
+                "requested_at": report.requested_at,
+                "evaluation_time": report.evaluation_time,
+                "account_equity_cny": report.account_equity_cny,
+                "risk_state_initialized": initialized,
                 "json_report": str(json_path),
                 "markdown_report": str(markdown_path),
             }
@@ -136,13 +231,19 @@ def execute(args: argparse.Namespace) -> int:
         return 0
     if args.command == "compare":
         risk_store = RiskStateStore(args.risk_state or config.output.risk_state_file)
-        risk_state = risk_store.load(
-            current_date=datetime.now(UTC).date(),
+        risk_state, initialized = risk_store.load_or_initialize(
+            current_date=current_date,
             initial_equity_cny=config.risk.account_equity_cny,
-        ).with_equity(config.risk.account_equity_cny)
+        )
         rows = []
         for symbol in args.symbols:
-            report = analyze_symbol(symbol, config, client=client, risk_state=risk_state)
+            report = analyze_symbol(
+                symbol,
+                config,
+                client=client,
+                risk_state=risk_state,
+                risk_state_initialized=initialized,
+            )
             paths = save_analysis(report, output_dir)
             rows.append(
                 {
@@ -154,8 +255,14 @@ def execute(args: argparse.Namespace) -> int:
                 }
             )
         rows.sort(key=lambda row: float(row["score"]), reverse=True)
-        risk_store.save(risk_state)
-        _json_print({"ranking": rows, "note": "评分只是确定性候选排序，不是收益预测。"})
+        _json_print(
+            {
+                "ranking": rows,
+                "account_equity_cny": risk_state.current_equity_cny,
+                "risk_state_initialized": initialized,
+                "note": "评分只是确定性候选排序，不是收益预测。",
+            }
+        )
         return 0
     if args.command == "backtest":
         frames: dict[str, pd.DataFrame] = {}

@@ -9,12 +9,19 @@ from datetime import UTC, datetime
 import pandas as pd
 
 from .config import AppConfig
-from .data import BinancePublicClient, drop_incomplete_last_bar, validate_market_data
+from .data import (
+    INTERVAL_SECONDS,
+    BinancePublicClient,
+    drop_incomplete_last_bar,
+    validate_market_data,
+)
 from .models import AnalysisReport, DataQuality, QualityGrade
-from .risk import RiskState, calculate_position
+from .risk import RiskState, calculate_position, risk_blockers
 from .strategy import (
     REQUIRED_TIMEFRAMES,
     SetupEvaluation,
+    align_evaluation_time,
+    closed_bars_at,
     evaluate_setup_at_time,
     prepare_market_frames,
 )
@@ -27,6 +34,9 @@ def _build_report(
     config: AppConfig,
     evaluation: SetupEvaluation,
     quality: dict[str, DataQuality],
+    risk_state: RiskState,
+    *,
+    risk_state_initialized: bool,
 ) -> AnalysisReport:
     decision = evaluation.decision
     current_price = float(evaluation.frames["4h"]["close"].iloc[-1])
@@ -42,6 +52,7 @@ def _build_report(
             entry_price=current_price,
             stop_price=decision.stop_loss,
             config=config.risk,
+            account_equity_cny=risk_state.current_equity_cny,
         )
     warnings = [
         "仅使用公开现货行情，不包含订单簿、私有账户或执行能力。",
@@ -49,6 +60,9 @@ def _build_report(
     ]
     warnings.extend(f"{tf}: {issue}" for tf, item in quality.items() for issue in item.issues)
     warnings.extend(f"阻断条件：{blocker}" for blocker in decision.blockers)
+    warnings.append(f"仓位计算使用持久化当前权益 ¥{risk_state.current_equity_cny:.2f}。")
+    if risk_state_initialized:
+        warnings.append("风险状态文件原先缺失，已使用配置中的首次初始化权益安全创建。")
     reasons = [
         f"日线趋势={evaluation.trends['1d'].value}",
         f"4小时趋势={evaluation.trends['4h'].value}",
@@ -57,14 +71,28 @@ def _build_report(
     if not decision.confirmations:
         reasons.append("未满足足够的确定性确认条件")
     return AnalysisReport(
-        generated_at=evaluation.evaluated_at,
+        generated_at=datetime.now(UTC),
+        requested_at=evaluation.requested_at,
+        evaluation_time=evaluation.evaluation_time,
+        evaluation_timeframe="4h",
+        time_alignment_applied=evaluation.time_alignment_applied,
+        latest_completed_candle_close={
+            timeframe: (
+                evaluation.frames[timeframe].index[-1]
+                + pd.Timedelta(seconds=INTERVAL_SECONDS[timeframe])
+            ).to_pydatetime()
+            for timeframe in REQUIRED_TIMEFRAMES
+        },
         symbol=symbol.upper().replace("-", "/"),
         data_source="Binance public spot REST /api/v3/klines (completed candles only)",
         analysis_timeframes=list(REQUIRED_TIMEFRAMES),
         current_price=current_price,
+        account_equity_cny=risk_state.current_equity_cny,
+        risk_locks=risk_blockers(config.risk, risk_state),
         data_quality=quality,
         daily_trend=evaluation.trends["1d"],
         four_hour_trend=evaluation.trends["4h"],
+        one_hour_trend=evaluation.trends["1h"],
         one_hour_confirmation=(
             "、".join(item for item in decision.confirmations if item) or "没有足够的入场确认"
         ),
@@ -110,34 +138,43 @@ def analyze_frames_at_time(
     *,
     evaluated_at: datetime,
     risk_state: RiskState | None = None,
+    risk_state_initialized: bool = False,
 ) -> AnalysisReport:
-    """Analyze supplied frames exactly as they were visible at a historical/current time."""
+    """Analyze open-time-indexed frames at one aligned completed 4h decision time."""
 
     prepared = prepare_market_frames(frames, config)
+    evaluation_time = align_evaluation_time(evaluated_at)
     visible_quality: dict[str, DataQuality] = {}
     for timeframe in REQUIRED_TIMEFRAMES:
-        close_delta = pd.Timedelta(seconds={"1d": 86_400, "4h": 14_400, "1h": 3_600}[timeframe])
-        timestamp = pd.Timestamp(evaluated_at)
-        timestamp = (
-            timestamp.tz_localize("UTC")
-            if timestamp.tzinfo is None
-            else timestamp.tz_convert("UTC")
-        )
-        visible = (
-            frames[timeframe]
-            .loc[frames[timeframe].index + close_delta <= timestamp]
-            .tail(config.market.history_limit)
+        visible = closed_bars_at(
+            prepared[timeframe],
+            timeframe,
+            evaluation_time,
+            history_limit=config.market.history_limit,
         )
         visible_quality[timeframe] = validate_market_data(visible, timeframe)
     complete = all(item.grade == QualityGrade.VALID for item in visible_quality.values())
+    state = risk_state or RiskState(
+        date=evaluation_time.date(),
+        daily_start_equity_cny=config.risk.account_equity_cny,
+        current_equity_cny=config.risk.account_equity_cny,
+        peak_equity_cny=config.risk.account_equity_cny,
+    )
     evaluation = evaluate_setup_at_time(
         prepared,
         config,
-        evaluated_at=evaluated_at,
-        risk_state=risk_state,
+        requested_at=evaluated_at,
+        risk_state=state,
         data_is_complete=complete,
     )
-    return _build_report(symbol, config, evaluation, visible_quality)
+    return _build_report(
+        symbol,
+        config,
+        evaluation,
+        visible_quality,
+        state,
+        risk_state_initialized=risk_state_initialized,
+    )
 
 
 def analyze_symbol(
@@ -146,8 +183,9 @@ def analyze_symbol(
     *,
     client: BinancePublicClient | None = None,
     risk_state: RiskState | None = None,
+    risk_state_initialized: bool = False,
 ) -> AnalysisReport:
-    """Fetch public frames and run the same evaluator used by backtests."""
+    """Fetch public frames and align them to the shared completed 4h decision time."""
 
     market_client = client or BinancePublicClient(config.market)
     as_of = datetime.now(UTC)
@@ -161,6 +199,7 @@ def analyze_symbol(
         config,
         evaluated_at=as_of,
         risk_state=risk_state,
+        risk_state_initialized=risk_state_initialized,
     )
     LOGGER.info(
         "analysis completed",

@@ -23,7 +23,7 @@ python -m pip install -e '.[dev]'
 从 GitHub 安装为当前 OpenClaw workspace Skill：
 
 ```bash
-openclaw skills install git:nvnmvm/crypto-strategy-analyst@v0.1.0
+openclaw skills install git:nvnmvm/crypto-strategy-analyst@v0.1.1
 python3 -m pip install ~/.openclaw/workspace/skills/crypto-strategy-analyst
 openclaw skills list
 ```
@@ -37,12 +37,19 @@ crypto-strategy-analyst analyze --symbol BTC/USDT --output-dir outputs
 crypto-strategy-analyst analyze --symbol ETH/USDT --output-dir outputs
 crypto-strategy-analyst compare --symbols BTC/USDT ETH/USDT --output-dir outputs
 crypto-strategy-analyst backtest --symbol BTC/USDT --start 2021-01-01 --end 2025-12-31 --output-dir outputs
+crypto-strategy-analyst risk initialize --equity-cny 1000
+crypto-strategy-analyst risk status
+crypto-strategy-analyst risk update-equity --equity-cny 950
+crypto-strategy-analyst risk record-trade --pnl-cny -10 --stopped-out
+crypto-strategy-analyst risk reset-daily
 crypto-strategy-analyst latest --output-dir outputs
 ```
 
 默认参数在 `config/default.yaml`，示例覆盖在 `config/example.yaml`。核心逻辑在 `src/crypto_strategy_analyst`；`scripts` 只提供薄入口。
 
-风险状态默认原子保存到 `state/risk-state.json`，包含 UTC 日期、当日止损次数、当日已实现亏损、峰值权益和当前回撤。文件损坏时系统会失败关闭，不会静默重置保护条件。
+所有策略请求先对齐到最近一个已完成的 UTC 4 小时收盘点；日线、4 小时线和 1 小时线统一裁剪到该时刻。索引始终表示开盘时间，收盘时间为开盘时间加周期长度，回测信号最早在下一根 4 小时线开盘成交。
+
+风险状态默认保存到 `state/risk-state.json`，包含 UTC 日期、当日起始权益、止损次数、已实现亏损、当前权益、峰值权益和当前回撤。写入采用带超时的 POSIX 文件锁、`fsync` 和原子替换，支持 Linux/macOS 多进程并发；文件损坏时失败关闭。配置中的 `account_equity_cny` 只用于首次安全初始化，不会覆盖后续实际权益。`record-trade` 固定采用“新权益 = 旧权益 + pnl”规则。
 
 回测输出的 `time_splits` 只是固定 60%/20%/20% 时间切分，不是滚动 walk-forward，也不进行自动参数优化。
 

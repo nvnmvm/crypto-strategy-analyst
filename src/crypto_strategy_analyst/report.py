@@ -49,9 +49,17 @@ def analysis_markdown(report: AnalysisReport) -> str:
         f"""# {report.symbol} 现货策略研究报告
 
 - 生成时间（UTC）：{report.generated_at.isoformat()}
+- 请求分析时间（UTC）：{report.requested_at.isoformat()}
+- 实际策略评估时间（UTC）：{report.evaluation_time.isoformat()}
+- 决策周期：{report.evaluation_timeframe}
+- 已应用时间对齐：{str(report.time_alignment_applied).lower()}
+- 最新完整日线截止：{report.latest_completed_candle_close['1d'].isoformat()}
+- 最新完整 4 小时线截止：{report.latest_completed_candle_close['4h'].isoformat()}
+- 最新完整 1 小时线截止：{report.latest_completed_candle_close['1h'].isoformat()}
 - 数据来源：{report.data_source}
 - 市场：Binance 现货
 - 当前价格：{report.current_price:,.4f} USDT
+- 当前账户权益：¥{report.account_equity_cny:,.2f}
 
 ## 1. 当前结论
 
@@ -66,6 +74,8 @@ def analysis_markdown(report: AnalysisReport) -> str:
 {report.four_hour_trend.value}
 
 ## 4. 1 小时确认情况
+
+趋势：{report.one_hour_trend.value}
 
 {report.one_hour_confirmation}
 

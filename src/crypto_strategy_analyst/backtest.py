@@ -56,13 +56,13 @@ def evaluate_backtest_at_time(
     evaluated_at: datetime,
     risk_state: RiskState | None = None,
 ) -> SetupEvaluation:
-    """Expose the exact evaluator used during replay for consistency tests and audits."""
+    """Evaluate open-time-indexed replay frames at the shared completed 4h close."""
 
     prepared = prepare_market_frames(frames, config)
     return evaluate_setup_at_time(
         prepared,
         config,
-        evaluated_at=evaluated_at,
+        requested_at=evaluated_at,
         risk_state=risk_state,
         data_is_complete=True,
     )
@@ -194,7 +194,12 @@ def run_backtest(
     end: str | datetime | None = None,
     decision_observer: Callable[[datetime, SetupEvaluation], None] | None = None,
 ) -> BacktestResult:
-    """Replay completed 1d/4h/1h candles and execute shared evaluator decisions next bar."""
+    """Replay closed 1d/4h/1h inputs and execute each decision next 4h open.
+
+    DataFrame indices are candle open times. ``close_time`` is open plus four
+    hours; only then is the shared evaluator called, and a pending entry cannot
+    execute until the following frame's open.
+    """
 
     prepared = prepare_market_frames(frames, config)
     four_hour = prepared["4h"]
@@ -223,6 +228,8 @@ def run_backtest(
     total_fees = total_slippage = 0.0
     risk_state = RiskState(
         date=start_time.date(),
+        daily_start_equity_cny=config.risk.account_equity_cny,
+        current_equity_cny=config.risk.account_equity_cny,
         peak_equity_cny=config.risk.account_equity_cny,
     )
 
@@ -359,7 +366,7 @@ def run_backtest(
             evaluation = evaluate_setup_at_time(
                 prepared,
                 config,
-                evaluated_at=close_time.to_pydatetime(),
+                requested_at=close_time.to_pydatetime(),
                 risk_state=risk_state,
                 data_is_complete=True,
             )

@@ -2,6 +2,20 @@
 
 All notable changes follow Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.1.1] - 2026-06-30
+
+### Added
+
+- Shared 4h decision-time alignment with explicit request, evaluation, and per-timeframe cutoff reporting.
+- `risk initialize`, `status`, `update-equity`, `record-trade`, and `reset-daily` commands.
+- Current account equity, daily starting equity, process-safe file locking, and concurrent update tests.
+- Manual GitHub Actions dispatch alongside main pushes and pull requests.
+
+### Fixed
+
+- Prevented 1h confirmations after the common 4h close from leaking into live decisions.
+- Sized analysis positions from persisted current equity instead of repeatedly restoring configured equity.
+
 ## [0.1.0] - 2026-06-30
 
 ### Added

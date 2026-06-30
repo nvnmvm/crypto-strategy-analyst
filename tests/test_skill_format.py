@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -20,3 +21,11 @@ def test_openclaw_skill_frontmatter_and_basedir():
 def test_git_install_root_contains_skill_file():
     assert (ROOT / "SKILL.md").is_file()
     assert (ROOT / "pyproject.toml").is_file()
+
+
+def test_release_version_metadata_is_synchronized():
+    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert version == "0.1.1"
+    assert project["project"]["version"] == version
+    assert f"@v{version}" in (ROOT / "README.md").read_text(encoding="utf-8")

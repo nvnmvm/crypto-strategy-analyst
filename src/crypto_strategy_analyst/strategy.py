@@ -19,11 +19,15 @@ from .signal import SignalDecision, generate_signal
 from .structure import classify_trend, detect_confirmed_swings
 
 REQUIRED_TIMEFRAMES = ("1d", "4h", "1h")
+DECISION_TIMEFRAME = "4h"
 
 
 @dataclass(frozen=True, slots=True)
 class SetupEvaluation:
-    evaluated_at: datetime
+    requested_at: datetime
+    evaluation_time: datetime
+    evaluation_timeframe: str
+    time_alignment_applied: bool
     frames: dict[str, pd.DataFrame]
     trends: dict[str, Trend]
     indicators: dict[str, IndicatorSnapshot]
@@ -31,12 +35,43 @@ class SetupEvaluation:
     resistances: list[PriceZone]
     decision: SignalDecision
 
+    @property
+    def evaluated_at(self) -> datetime:
+        """Backward-compatible alias for the common strategy evaluation time."""
+
+        return self.evaluation_time
+
+
+def _as_utc_timestamp(value: datetime) -> pd.Timestamp:
+    """Normalize a naive-or-aware datetime to an aware UTC timestamp."""
+
+    timestamp = pd.Timestamp(value)
+    return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
+
+
+def align_evaluation_time(
+    requested_at: datetime,
+    decision_timeframe: str = DECISION_TIMEFRAME,
+) -> datetime:
+    """Align a request to the latest completed decision-candle close.
+
+    DataFrame indices are candle open times. For the 4h decision timeframe, a
+    candle opened at 12:00 closes at 16:00. Exact UTC boundaries are treated as
+    completed close instants, so 16:00 aligns to 16:00 while 15:30 aligns to
+    12:00. All strategy inputs are subsequently clipped to this shared instant.
+    """
+
+    if decision_timeframe != DECISION_TIMEFRAME:
+        raise ValueError(f"unsupported decision timeframe: {decision_timeframe}")
+    requested = _as_utc_timestamp(requested_at)
+    return requested.floor("4h").to_pydatetime()
+
 
 def prepare_market_frames(
     frames: Mapping[str, pd.DataFrame],
     config: AppConfig,
 ) -> dict[str, pd.DataFrame]:
-    """Calculate past-only indicators once for all required timeframes."""
+    """Calculate past-only indicators for frames indexed by candle open time."""
 
     missing = set(REQUIRED_TIMEFRAMES) - set(frames)
     if missing:
@@ -58,16 +93,13 @@ def prepare_market_frames(
 def closed_bars_at(
     frame: pd.DataFrame,
     timeframe: str,
-    evaluated_at: datetime,
+    evaluation_time: datetime,
     *,
     history_limit: int,
 ) -> pd.DataFrame:
-    """Return only candles whose close time is at or before evaluated_at."""
+    """Return candles whose ``open time + duration`` is at most evaluation_time."""
 
-    timestamp = pd.Timestamp(evaluated_at)
-    timestamp = (
-        timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
-    )
+    timestamp = _as_utc_timestamp(evaluation_time)
     close_times = frame.index + pd.Timedelta(seconds=INTERVAL_SECONDS[timeframe])
     visible = frame.loc[close_times <= timestamp].tail(history_limit).copy()
     if len(visible) < 210:
@@ -81,13 +113,23 @@ def evaluate_setup_at_time(
     prepared_frames: Mapping[str, pd.DataFrame],
     config: AppConfig,
     *,
+    requested_at: datetime | None = None,
     evaluated_at: datetime | None = None,
     risk_state: RiskState | None = None,
     data_is_complete: bool = True,
 ) -> SetupEvaluation:
-    """Evaluate one setup identically for current-time analysis and historical replay."""
+    """Evaluate one setup after aligning every timeframe to one completed 4h close.
 
-    as_of = evaluated_at or datetime.now(UTC)
+    ``requested_at`` is the caller's wall-clock or replay request. The legacy
+    ``evaluated_at`` keyword remains an alias for compatibility. Every frame is
+    indexed by candle open time and is clipped using its explicit close time.
+    """
+
+    if requested_at is not None and evaluated_at is not None:
+        raise ValueError("pass only one of requested_at or evaluated_at")
+    requested = requested_at or evaluated_at or datetime.now(UTC)
+    requested_timestamp = _as_utc_timestamp(requested)
+    evaluation_time = align_evaluation_time(requested_timestamp.to_pydatetime())
     visible_frames: dict[str, pd.DataFrame] = {}
     trends: dict[str, Trend] = {}
     indicators: dict[str, IndicatorSnapshot] = {}
@@ -96,7 +138,7 @@ def evaluate_setup_at_time(
         visible = closed_bars_at(
             prepared_frames[timeframe],
             timeframe,
-            as_of,
+            evaluation_time,
             history_limit=config.market.history_limit,
         )
         visible_frames[timeframe] = visible
@@ -141,7 +183,10 @@ def evaluate_setup_at_time(
         risk_state=risk_state,
     )
     return SetupEvaluation(
-        evaluated_at=pd.Timestamp(as_of).to_pydatetime(),
+        requested_at=requested_timestamp.to_pydatetime(),
+        evaluation_time=evaluation_time,
+        evaluation_timeframe=DECISION_TIMEFRAME,
+        time_alignment_applied=requested_timestamp != _as_utc_timestamp(evaluation_time),
         frames=visible_frames,
         trends=trends,
         indicators=indicators,

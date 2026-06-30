@@ -110,16 +110,24 @@ class PositionSuggestion(BaseModel):
 class AnalysisReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "1.0.0"
+    schema_version: str = "1.1.0"
     generated_at: datetime
+    requested_at: datetime
+    evaluation_time: datetime
+    evaluation_timeframe: Literal["4h"] = "4h"
+    time_alignment_applied: bool
+    latest_completed_candle_close: dict[str, datetime]
     symbol: str
     market: Literal["binance_spot"] = "binance_spot"
     data_source: str
     analysis_timeframes: list[str]
     current_price: float = Field(gt=0)
+    account_equity_cny: float = Field(ge=0)
+    risk_locks: list[str]
     data_quality: dict[str, DataQuality]
     daily_trend: Trend
     four_hour_trend: Trend
+    one_hour_trend: Trend
     one_hour_confirmation: str
     support_zones: list[PriceZone]
     resistance_zones: list[PriceZone]

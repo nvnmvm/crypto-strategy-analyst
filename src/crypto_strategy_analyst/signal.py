@@ -50,7 +50,11 @@ def generate_signal(
 ) -> SignalDecision:
     """Score one completed-bar setup without model judgment or future bars."""
 
-    risk_state = risk_state or RiskState(peak_equity_cny=config.risk.account_equity_cny)
+    risk_state = risk_state or RiskState(
+        daily_start_equity_cny=config.risk.account_equity_cny,
+        current_equity_cny=config.risk.account_equity_cny,
+        peak_equity_cny=config.risk.account_equity_cny,
+    )
     current = four_hour_frame.iloc[-1]
     previous = four_hour_frame.iloc[-2]
     current_price, atr = float(current["close"]), float(current["atr14"])
@@ -173,6 +177,7 @@ def generate_signal(
         "daily_stop_count_reached",
         "daily_loss_limit_reached",
         "maximum_drawdown_protection_active",
+        "account_equity_depleted",
         "resistance_space_below_two_r",
         "no_key_resistance_for_targets",
     }
