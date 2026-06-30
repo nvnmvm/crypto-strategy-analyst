@@ -1,3 +1,4 @@
+config_version: 1
 market:
   exchange: binance
   market_type: spot
@@ -6,6 +7,9 @@ market:
   history_limit: 500
   request_timeout_seconds: 15
   max_retries: 3
+  freshness_retry_count: 3
+  freshness_retry_delay_seconds: 20
+  freshness_grace_seconds: 90
 risk:
   account_equity_cny: 1000.0
   cny_per_usdt: 7.2
@@ -30,6 +34,8 @@ strategy:
   break_atr_multiple: 0.25
   target_resistance_buffer_atr: 0.15
   min_second_target_r_multiple: 2.5
+  max_entry_gap_atr: 0.5
+  pending_signal_valid_bars: 1
   enable_adx: true
   random_seed: 42
 backtest:
@@ -39,7 +45,9 @@ backtest:
   train_ratio: 0.6
   validation_ratio: 0.2
   test_ratio: 0.2
+  minimum_sample_trades: 30
 output:
   output_dir: outputs
   log_dir: logs
   risk_state_file: state/risk-state.json
+  risk_events_file: state/risk-events.jsonl

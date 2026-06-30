@@ -41,6 +41,12 @@ def analysis_markdown(report: AnalysisReport) -> str:
         f"- {timeframe}: {quality.grade.value}，{quality.bars} 根，gap={quality.gap_count}"
         for timeframe, quality in report.data_quality.items()
     )
+    freshness_lines = "\n".join(
+        f"- {timeframe}: {item.status.value}；预期 {item.expected_latest_close.isoformat()}；"
+        f"实际 {item.actual_latest_close.isoformat() if item.actual_latest_close else 'missing'}；"
+        f"滞后 {item.staleness_seconds:.0f} 秒"
+        for timeframe, item in report.data_freshness.items()
+    )
     missing = "、".join(f"{key}={value}" for key, value in report.missing_data.items())
     warnings = "\n".join(f"- {item}" for item in report.warnings) or "- 无额外警告"
     invalidations = "\n".join(f"- {item}" for item in report.invalidation_conditions)
@@ -60,6 +66,7 @@ def analysis_markdown(report: AnalysisReport) -> str:
 - 市场：Binance 现货
 - 当前价格：{report.current_price:,.4f} USDT
 - 当前账户权益：¥{report.account_equity_cny:,.2f}
+- 新鲜度重试次数：{report.freshness_retry_attempts}
 
 ## 1. 当前结论
 
@@ -139,6 +146,12 @@ def analysis_markdown(report: AnalysisReport) -> str:
 ## 15. 数据质量、缺失和风险警告
 
 {quality_lines}
+
+### 数据新鲜度
+
+{freshness_lines}
+
+交易规则状态：{report.trading_rules_status}
 
 缺失数据：{missing}
 

@@ -19,3 +19,11 @@ class InsufficientDataError(MarketDataError):
 
 class RiskStateError(CryptoStrategyError):
     """Raised when persisted risk state is missing required integrity."""
+
+
+class PositionConstraintError(CryptoStrategyError):
+    """Raised when a risk-sized position cannot satisfy public spot rules."""
+
+
+class DatasetIntegrityError(CryptoStrategyError):
+    """Raised when an offline dataset snapshot fails manifest verification."""

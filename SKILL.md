@@ -15,10 +15,10 @@ Do not use it for live orders, private exchange APIs, API keys, leverage, future
 1. Check Python and dependencies with `python3 -c "import sys, crypto_strategy_analyst; assert sys.version_info >= (3, 11)"`. If unavailable, stop and ask the operator to use Python 3.11+ and run `python3 -m pip install '{baseDir}'`; never install packages silently.
 2. Fetch only public Binance spot OHLCV through `{baseDir}/scripts/fetch_market_data.py` or run the complete pipeline with `{baseDir}/scripts/analyze_market.py`.
 3. Load `{baseDir}`-configured persistent risk state before analysis. Use its current equity for sizing, never overwrite it with the configuration default, treat corrupt state as a hard error, and reset only daily fields when the UTC date changes.
-4. Validate UTC ordering, duplicates, OHLC consistency, time gaps, and minimum history before analysis. If any required timeframe is invalid or has a gap, stop trade-candidate generation and report the data problem.
+4. Validate UTC ordering, duplicates, OHLC consistency, time gaps, minimum history, and the expected latest close for every timeframe. If any required timeframe is stale, missing, invalid, or has a gap, stop trade-candidate generation and report the data problem.
 5. Align every request to the latest completed UTC 4h close, then call the shared `evaluate_setup_at_time` workflow in fixed order: closed daily trend and levels, closed four-hour setup, closed one-hour confirmation, deterministic score, resistance-aware reward/risk, risk controls, position size, then report. Backtests must call the same alignment function and evaluator.
 6. Treat 1h only as confirmation. Never let it override a bearish daily trend.
-7. Require at least two entry confirmations, reward/risk of at least 2:1, two feasible targets before the nearest resistance, no daily stop, no daily loss lock, and no drawdown lock.
+7. Require at least two entry confirmations, reward/risk of at least 2:1, two feasible targets before the nearest resistance, no daily stop, no daily loss lock, and no drawdown lock. Treat the report as a candidate plan; revalidate it at the next 4h open and cancel gaps, expired signals, crossed targets, and sub-2R entries.
 8. Save a timestamped JSON and Chinese Markdown report. Include UTC generation time, Binance public-data provenance, missing optional sources as `not_available`, and the disclaimer “策略研究结果，不是收益保证，也不是投资建议”。
 
 ## Commands
@@ -47,7 +47,8 @@ Initialize and maintain the locked persistent risk state:
 crypto-strategy-analyst risk initialize --equity-cny 1000
 crypto-strategy-analyst risk status
 crypto-strategy-analyst risk update-equity --equity-cny 950
-crypto-strategy-analyst risk record-trade --pnl-cny -10 --stopped-out
+crypto-strategy-analyst risk record-trade --trade-id manual-btc-20260701-001 --pnl-cny -10 --stopped-out
+crypto-strategy-analyst risk history --limit 20
 ```
 
 Return the last saved report without reinterpreting it:

@@ -1,5 +1,55 @@
 {
   "$defs": {
+    "DataFreshnessItem": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/FreshnessStatus"
+        },
+        "expected_latest_close": {
+          "format": "date-time",
+          "title": "Expected Latest Close",
+          "type": "string"
+        },
+        "actual_latest_close": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actual Latest Close"
+        },
+        "staleness_seconds": {
+          "minimum": 0,
+          "title": "Staleness Seconds",
+          "type": "number"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "status",
+        "expected_latest_close",
+        "actual_latest_close",
+        "staleness_seconds"
+      ],
+      "title": "DataFreshnessItem",
+      "type": "object"
+    },
     "DataQuality": {
       "additionalProperties": false,
       "properties": {
@@ -49,6 +99,16 @@
       ],
       "title": "DataQuality",
       "type": "object"
+    },
+    "FreshnessStatus": {
+      "enum": [
+        "fresh",
+        "stale",
+        "missing",
+        "invalid"
+      ],
+      "title": "FreshnessStatus",
+      "type": "string"
     },
     "IndicatorSnapshot": {
       "additionalProperties": false,
@@ -150,6 +210,26 @@
           "exclusiveMinimum": 0,
           "title": "Quote To Account Rate",
           "type": "number"
+        },
+        "entry_price": {
+          "exclusiveMinimum": 0,
+          "title": "Entry Price",
+          "type": "number"
+        },
+        "stop_price": {
+          "exclusiveMinimum": 0,
+          "title": "Stop Price",
+          "type": "number"
+        },
+        "minimum_notional": {
+          "minimum": 0,
+          "title": "Minimum Notional",
+          "type": "number"
+        },
+        "quantity_step_size": {
+          "exclusiveMinimum": 0,
+          "title": "Quantity Step Size",
+          "type": "number"
         }
       },
       "required": [
@@ -157,7 +237,11 @@
         "position_notional_cny",
         "risk_amount_cny",
         "position_fraction",
-        "quote_to_account_rate"
+        "quote_to_account_rate",
+        "entry_price",
+        "stop_price",
+        "minimum_notional",
+        "quantity_step_size"
       ],
       "title": "PositionSuggestion",
       "type": "object"
@@ -319,6 +403,68 @@
       "title": "SignalLabel",
       "type": "string"
     },
+    "SymbolTradingRules": {
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        },
+        "price_tick_size": {
+          "exclusiveMinimum": 0,
+          "title": "Price Tick Size",
+          "type": "number"
+        },
+        "quantity_step_size": {
+          "exclusiveMinimum": 0,
+          "title": "Quantity Step Size",
+          "type": "number"
+        },
+        "minimum_quantity": {
+          "minimum": 0,
+          "title": "Minimum Quantity",
+          "type": "number"
+        },
+        "maximum_quantity": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum Quantity"
+        },
+        "minimum_notional": {
+          "minimum": 0,
+          "title": "Minimum Notional",
+          "type": "number"
+        },
+        "fetched_at": {
+          "format": "date-time",
+          "title": "Fetched At",
+          "type": "string"
+        },
+        "data_source": {
+          "title": "Data Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "price_tick_size",
+        "quantity_step_size",
+        "minimum_quantity",
+        "minimum_notional",
+        "fetched_at",
+        "data_source"
+      ],
+      "title": "SymbolTradingRules",
+      "type": "object"
+    },
     "Trend": {
       "enum": [
         "bullish",
@@ -332,7 +478,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "default": "1.1.0",
+      "default": "1.2.0",
       "title": "Schema Version",
       "type": "string"
     },
@@ -368,6 +514,18 @@
       },
       "title": "Latest Completed Candle Close",
       "type": "object"
+    },
+    "data_freshness": {
+      "additionalProperties": {
+        "$ref": "#/$defs/DataFreshnessItem"
+      },
+      "title": "Data Freshness",
+      "type": "object"
+    },
+    "freshness_retry_attempts": {
+      "minimum": 0,
+      "title": "Freshness Retry Attempts",
+      "type": "integer"
     },
     "symbol": {
       "title": "Symbol",
@@ -406,6 +564,26 @@
       },
       "title": "Risk Locks",
       "type": "array"
+    },
+    "trading_rules": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SymbolTradingRules"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Trading Rules"
+    },
+    "trading_rules_status": {
+      "enum": [
+        "available",
+        "trading_rules_not_available"
+      ],
+      "title": "Trading Rules Status",
+      "type": "string"
     },
     "data_quality": {
       "additionalProperties": {
@@ -589,12 +767,16 @@
     "evaluation_time",
     "time_alignment_applied",
     "latest_completed_candle_close",
+    "data_freshness",
+    "freshness_retry_attempts",
     "symbol",
     "data_source",
     "analysis_timeframes",
     "current_price",
     "account_equity_cny",
     "risk_locks",
+    "trading_rules",
+    "trading_rules_status",
     "data_quality",
     "daily_trend",
     "four_hour_trend",

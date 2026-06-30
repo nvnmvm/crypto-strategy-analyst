@@ -64,7 +64,9 @@ def test_analysis_fails_closed_for_persisted_risk_locks(market_frames, state, ex
     assert report.suggested_position_size == "not_available"
 
 
-def test_analysis_position_uses_persisted_current_equity(market_frames, monkeypatch):
+def test_analysis_position_uses_persisted_current_equity(
+    market_frames, trading_rules, monkeypatch
+):
     config = AppConfig()
     requested = market_frames["1d"].index[220] + pd.Timedelta(days=1)
     baseline = evaluate_setup_at_time(
@@ -112,9 +114,10 @@ def test_analysis_position_uses_persisted_current_equity(market_frames, monkeypa
         config,
         evaluated_at=requested.to_pydatetime(),
         risk_state=state,
+        trading_rules=trading_rules,
     )
 
     assert report.account_equity_cny == 500
     assert report.maximum_loss_amount == 5
     assert report.suggested_position_size != "not_available"
-    assert report.suggested_position_size.position_notional_cny == 100
+    assert report.suggested_position_size.position_notional_cny == pytest.approx(100, abs=0.1)

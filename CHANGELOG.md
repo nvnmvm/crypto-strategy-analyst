@@ -2,6 +2,21 @@
 
 All notable changes follow Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.1.2] - 2026-07-01
+
+### Added
+
+- Per-timeframe data-freshness gates with bounded live retries and fail-closed reports.
+- Next-4h-open candidate revalidation and explicit cancellation counters/reasons.
+- Risk state v2 trade-id idempotency, migration backups, and append-only JSONL audit history.
+- Public Binance spot precision/minimum-notional constraints for analysis, sizing, and backtests.
+- Checksummed 1d/4h/1h dataset snapshots, fully offline backtests, reproducibility hashes, extended metrics, and cost sensitivity scenarios.
+- Wheel asset verification and install smoke tests across Python 3.11, 3.12, and 3.13.
+
+### Security
+
+- The package remains research-only and contains no order placement, private account, API-key, leverage, futures, borrowing, shorting, or withdrawal functionality.
+
 ## [0.1.1] - 2026-06-30
 
 ### Added

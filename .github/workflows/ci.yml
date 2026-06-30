@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -23,4 +24,19 @@ jobs:
           cache: pip
       - run: python -m pip install -e '.[dev]'
       - run: ruff check .
-      - run: pytest
+      - run: pytest --cov=crypto_strategy_analyst --cov-report=term-missing --cov-fail-under=75
+      - run: python -m pip check
+      - run: python -m build
+      - name: Verify wheel install and OpenClaw assets
+        shell: bash
+        run: |
+          wheel="$(find dist -name '*.whl' -print -quit)"
+          python -m zipfile -l "$wheel" | tee wheel-contents.txt
+          grep -q 'SKILL.md' wheel-contents.txt
+          grep -q 'references/strategy-rules.md' wheel-contents.txt
+          grep -q 'schemas/analysis-report.schema.json' wheel-contents.txt
+          grep -q 'config/default.yaml' wheel-contents.txt
+          python -m venv /tmp/crypto-strategy-wheel
+          /tmp/crypto-strategy-wheel/bin/python -m pip install "$wheel"
+          /tmp/crypto-strategy-wheel/bin/crypto-strategy-analyst --help
+          /tmp/crypto-strategy-wheel/bin/crypto-strategy-analyst risk --help
