@@ -1,0 +1,41 @@
+market:
+  exchange: binance
+  market_type: spot
+  symbols: [BTC/USDT, ETH/USDT]
+  timeframes: [1d, 4h, 1h]
+  history_limit: 500
+  request_timeout_seconds: 15
+  max_retries: 3
+risk:
+  account_equity_cny: 1000.0
+  cny_per_usdt: 7.2
+  risk_per_trade: 0.01
+  max_risk_per_trade: 0.03
+  daily_stop_count: 2
+  daily_max_loss: 0.02
+  max_drawdown: 0.10
+  max_position_fraction: 1.0
+  min_reward_risk: 2.0
+  trailing_stop_method: atr
+  trailing_atr_multiple: 2.0
+strategy:
+  swing_left: 3
+  swing_right: 3
+  level_merge_percent: 0.006
+  support_proximity_atr: 1.0
+  volume_ratio_threshold: 1.2
+  min_confirmations: 2
+  enable_adx: true
+  random_seed: 42
+backtest:
+  interval: 4h
+  fee_rate: 0.001
+  slippage_rate: 0.0005
+  warmup_bars: 220
+  train_ratio: 0.6
+  validation_ratio: 0.2
+  test_ratio: 0.2
+output:
+  output_dir: outputs
+  log_dir: logs
+

@@ -1,0 +1,10 @@
+# 覆盖默认配置的示例。risk_per_trade 受 3% 硬上限约束。
+risk:
+  account_equity_cny: 2000.0
+  cny_per_usdt: 7.2
+  risk_per_trade: 0.015
+strategy:
+  volume_ratio_threshold: 1.3
+output:
+  output_dir: my-strategy-outputs
+

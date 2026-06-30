@@ -1,0 +1,562 @@
+{
+  "$defs": {
+    "DataQuality": {
+      "additionalProperties": false,
+      "properties": {
+        "grade": {
+          "$ref": "#/$defs/QualityGrade"
+        },
+        "bars": {
+          "minimum": 0,
+          "title": "Bars",
+          "type": "integer"
+        },
+        "expected_interval": {
+          "title": "Expected Interval",
+          "type": "string"
+        },
+        "duplicate_count": {
+          "minimum": 0,
+          "title": "Duplicate Count",
+          "type": "integer"
+        },
+        "gap_count": {
+          "minimum": 0,
+          "title": "Gap Count",
+          "type": "integer"
+        },
+        "missing_intervals": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing Intervals",
+          "type": "array"
+        },
+        "issues": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Issues",
+          "type": "array"
+        }
+      },
+      "required": [
+        "grade",
+        "bars",
+        "expected_interval",
+        "duplicate_count",
+        "gap_count"
+      ],
+      "title": "DataQuality",
+      "type": "object"
+    },
+    "IndicatorSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "close": {
+          "title": "Close",
+          "type": "number"
+        },
+        "ema20": {
+          "title": "Ema20",
+          "type": "number"
+        },
+        "ema50": {
+          "title": "Ema50",
+          "type": "number"
+        },
+        "ema200": {
+          "title": "Ema200",
+          "type": "number"
+        },
+        "rsi14": {
+          "title": "Rsi14",
+          "type": "number"
+        },
+        "macd": {
+          "title": "Macd",
+          "type": "number"
+        },
+        "macd_signal": {
+          "title": "Macd Signal",
+          "type": "number"
+        },
+        "macd_histogram": {
+          "title": "Macd Histogram",
+          "type": "number"
+        },
+        "atr14": {
+          "title": "Atr14",
+          "type": "number"
+        },
+        "adx14": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "const": "not_available",
+              "type": "string"
+            }
+          ],
+          "title": "Adx14"
+        },
+        "volume_ratio": {
+          "title": "Volume Ratio",
+          "type": "number"
+        }
+      },
+      "required": [
+        "close",
+        "ema20",
+        "ema50",
+        "ema200",
+        "rsi14",
+        "macd",
+        "macd_signal",
+        "macd_histogram",
+        "atr14",
+        "adx14",
+        "volume_ratio"
+      ],
+      "title": "IndicatorSnapshot",
+      "type": "object"
+    },
+    "PositionSuggestion": {
+      "additionalProperties": false,
+      "properties": {
+        "quantity": {
+          "minimum": 0,
+          "title": "Quantity",
+          "type": "number"
+        },
+        "position_notional_cny": {
+          "minimum": 0,
+          "title": "Position Notional Cny",
+          "type": "number"
+        },
+        "risk_amount_cny": {
+          "minimum": 0,
+          "title": "Risk Amount Cny",
+          "type": "number"
+        },
+        "position_fraction": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Position Fraction",
+          "type": "number"
+        },
+        "quote_to_account_rate": {
+          "exclusiveMinimum": 0,
+          "title": "Quote To Account Rate",
+          "type": "number"
+        }
+      },
+      "required": [
+        "quantity",
+        "position_notional_cny",
+        "risk_amount_cny",
+        "position_fraction",
+        "quote_to_account_rate"
+      ],
+      "title": "PositionSuggestion",
+      "type": "object"
+    },
+    "PriceZone": {
+      "additionalProperties": false,
+      "properties": {
+        "lower_price": {
+          "exclusiveMinimum": 0,
+          "title": "Lower Price",
+          "type": "number"
+        },
+        "upper_price": {
+          "exclusiveMinimum": 0,
+          "title": "Upper Price",
+          "type": "number"
+        },
+        "center_price": {
+          "exclusiveMinimum": 0,
+          "title": "Center Price",
+          "type": "number"
+        },
+        "level_type": {
+          "enum": [
+            "support",
+            "resistance"
+          ],
+          "title": "Level Type",
+          "type": "string"
+        },
+        "timeframe": {
+          "title": "Timeframe",
+          "type": "string"
+        },
+        "touch_count": {
+          "minimum": 1,
+          "title": "Touch Count",
+          "type": "integer"
+        },
+        "last_touch_time": {
+          "format": "date-time",
+          "title": "Last Touch Time",
+          "type": "string"
+        },
+        "strength_score": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Strength Score",
+          "type": "number"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "lower_price",
+        "upper_price",
+        "center_price",
+        "level_type",
+        "timeframe",
+        "touch_count",
+        "last_touch_time",
+        "strength_score",
+        "evidence"
+      ],
+      "title": "PriceZone",
+      "type": "object"
+    },
+    "QualityGrade": {
+      "enum": [
+        "valid",
+        "degraded",
+        "invalid"
+      ],
+      "title": "QualityGrade",
+      "type": "string"
+    },
+    "ScoreBreakdown": {
+      "additionalProperties": false,
+      "properties": {
+        "higher_timeframe_trend": {
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Higher Timeframe Trend",
+          "type": "number"
+        },
+        "support_resistance": {
+          "maximum": 25,
+          "minimum": 0,
+          "title": "Support Resistance",
+          "type": "number"
+        },
+        "candlestick_confirmation": {
+          "maximum": 15,
+          "minimum": 0,
+          "title": "Candlestick Confirmation",
+          "type": "number"
+        },
+        "volume_confirmation": {
+          "maximum": 15,
+          "minimum": 0,
+          "title": "Volume Confirmation",
+          "type": "number"
+        },
+        "indicator_confirmation": {
+          "maximum": 15,
+          "minimum": 0,
+          "title": "Indicator Confirmation",
+          "type": "number"
+        },
+        "reward_risk_space": {
+          "maximum": 10,
+          "minimum": 0,
+          "title": "Reward Risk Space",
+          "type": "number"
+        },
+        "sentiment_adjustment": {
+          "default": 0,
+          "maximum": 5,
+          "minimum": -5,
+          "title": "Sentiment Adjustment",
+          "type": "number"
+        }
+      },
+      "required": [
+        "higher_timeframe_trend",
+        "support_resistance",
+        "candlestick_confirmation",
+        "volume_confirmation",
+        "indicator_confirmation",
+        "reward_risk_space"
+      ],
+      "title": "ScoreBreakdown",
+      "type": "object"
+    },
+    "SignalLabel": {
+      "enum": [
+        "strong_buy_candidate",
+        "buy_candidate",
+        "watch",
+        "no_trade"
+      ],
+      "title": "SignalLabel",
+      "type": "string"
+    },
+    "Trend": {
+      "enum": [
+        "bullish",
+        "bearish",
+        "sideways"
+      ],
+      "title": "Trend",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "symbol": {
+      "title": "Symbol",
+      "type": "string"
+    },
+    "market": {
+      "const": "binance_spot",
+      "default": "binance_spot",
+      "title": "Market",
+      "type": "string"
+    },
+    "data_source": {
+      "title": "Data Source",
+      "type": "string"
+    },
+    "analysis_timeframes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Analysis Timeframes",
+      "type": "array"
+    },
+    "current_price": {
+      "exclusiveMinimum": 0,
+      "title": "Current Price",
+      "type": "number"
+    },
+    "data_quality": {
+      "additionalProperties": {
+        "$ref": "#/$defs/DataQuality"
+      },
+      "title": "Data Quality",
+      "type": "object"
+    },
+    "daily_trend": {
+      "$ref": "#/$defs/Trend"
+    },
+    "four_hour_trend": {
+      "$ref": "#/$defs/Trend"
+    },
+    "one_hour_confirmation": {
+      "title": "One Hour Confirmation",
+      "type": "string"
+    },
+    "support_zones": {
+      "items": {
+        "$ref": "#/$defs/PriceZone"
+      },
+      "title": "Support Zones",
+      "type": "array"
+    },
+    "resistance_zones": {
+      "items": {
+        "$ref": "#/$defs/PriceZone"
+      },
+      "title": "Resistance Zones",
+      "type": "array"
+    },
+    "indicators": {
+      "additionalProperties": {
+        "$ref": "#/$defs/IndicatorSnapshot"
+      },
+      "title": "Indicators",
+      "type": "object"
+    },
+    "signal": {
+      "$ref": "#/$defs/SignalLabel"
+    },
+    "signal_score": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Signal Score",
+      "type": "number"
+    },
+    "score_breakdown": {
+      "$ref": "#/$defs/ScoreBreakdown"
+    },
+    "entry_zone": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PriceZone"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Entry Zone"
+    },
+    "stop_loss": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Stop Loss"
+    },
+    "take_profit_1": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Take Profit 1"
+    },
+    "take_profit_2": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Take Profit 2"
+    },
+    "trailing_stop_method": {
+      "title": "Trailing Stop Method",
+      "type": "string"
+    },
+    "risk_reward_ratio": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Risk Reward Ratio"
+    },
+    "suggested_position_size": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PositionSuggestion"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Suggested Position Size"
+    },
+    "maximum_loss_amount": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "title": "Maximum Loss Amount"
+    },
+    "reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reasons",
+      "type": "array"
+    },
+    "invalidation_conditions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Invalidation Conditions",
+      "type": "array"
+    },
+    "missing_data": {
+      "additionalProperties": {
+        "const": "not_available",
+        "type": "string"
+      },
+      "title": "Missing Data",
+      "type": "object"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    },
+    "disclaimer": {
+      "default": "策略研究结果，不是收益保证，也不是投资建议。",
+      "title": "Disclaimer",
+      "type": "string"
+    }
+  },
+  "required": [
+    "generated_at",
+    "symbol",
+    "data_source",
+    "analysis_timeframes",
+    "current_price",
+    "data_quality",
+    "daily_trend",
+    "four_hour_trend",
+    "one_hour_confirmation",
+    "support_zones",
+    "resistance_zones",
+    "indicators",
+    "signal",
+    "signal_score",
+    "score_breakdown",
+    "entry_zone",
+    "stop_loss",
+    "take_profit_1",
+    "take_profit_2",
+    "trailing_stop_method",
+    "risk_reward_ratio",
+    "suggested_position_size",
+    "maximum_loss_amount",
+    "reasons",
+    "invalidation_conditions",
+    "missing_data",
+    "warnings"
+  ],
+  "title": "AnalysisReport",
+  "type": "object"
+}
