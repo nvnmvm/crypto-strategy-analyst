@@ -1,25 +1,113 @@
-"""Hard risk locks and position sizing."""
+"""Persistent risk locks and position sizing."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import os
+import tempfile
+from datetime import UTC, datetime
+from datetime import date as CalendarDate
+from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import RiskConfig
+from .errors import RiskStateError
 from .models import PositionSuggestion
 
 
-@dataclass(frozen=True, slots=True)
-class RiskState:
-    daily_stop_losses: int = 0
-    daily_loss_fraction: float = 0.0
-    current_drawdown: float = 0.0
+class RiskState(BaseModel):
+    """Risk controls that survive process restarts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    date: CalendarDate = Field(default_factory=lambda: datetime.now(UTC).date())
+    daily_stop_losses: int = Field(default=0, ge=0)
+    daily_realized_loss_cny: float = Field(default=0.0, ge=0)
+    peak_equity_cny: float = Field(default=0.0, ge=0)
+    current_drawdown: float = Field(default=0.0, ge=0, le=1)
+
+    def rolled_to(self, current_date: CalendarDate) -> RiskState:
+        """Reset daily fields only; preserve peak equity and drawdown."""
+
+        if current_date <= self.date:
+            return self.model_copy(deep=True)
+        return self.model_copy(
+            update={
+                "date": current_date,
+                "daily_stop_losses": 0,
+                "daily_realized_loss_cny": 0.0,
+            },
+            deep=True,
+        )
+
+    def with_equity(self, equity_cny: float) -> RiskState:
+        if equity_cny < 0:
+            raise ValueError("equity_cny cannot be negative")
+        peak = max(self.peak_equity_cny, equity_cny)
+        drawdown = 1 - equity_cny / peak if peak > 0 else 0.0
+        return self.model_copy(
+            update={"peak_equity_cny": peak, "current_drawdown": min(1.0, drawdown)},
+            deep=True,
+        )
+
+    def with_realized_result(self, pnl_cny: float, *, stopped_out: bool) -> RiskState:
+        loss = max(0.0, -pnl_cny)
+        return self.model_copy(
+            update={
+                "daily_stop_losses": self.daily_stop_losses + int(stopped_out and loss > 0),
+                "daily_realized_loss_cny": self.daily_realized_loss_cny + loss,
+            },
+            deep=True,
+        )
+
+
+class RiskStateStore:
+    """JSON risk-state store using same-directory atomic replacement."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser().resolve()
+
+    def load(self, *, current_date: CalendarDate, initial_equity_cny: float) -> RiskState:
+        if not self.path.exists():
+            return RiskState(date=current_date, peak_equity_cny=initial_equity_cny)
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            state = RiskState.model_validate(payload)
+        except (OSError, json.JSONDecodeError, ValidationError, TypeError) as exc:
+            raise RiskStateError(f"risk state is corrupt: {self.path}") from exc
+        return state.rolled_to(current_date)
+
+    def save(self, state: RiskState) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = handle.name
+                json.dump(state.model_dump(mode="json"), handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.path)
+        except OSError as exc:
+            if temporary_path:
+                Path(temporary_path).unlink(missing_ok=True)
+            raise RiskStateError(f"failed to atomically save risk state: {self.path}") from exc
 
 
 def risk_blockers(config: RiskConfig, state: RiskState) -> list[str]:
     blockers: list[str] = []
     if state.daily_stop_losses >= config.daily_stop_count:
         blockers.append("daily_stop_count_reached")
-    if state.daily_loss_fraction >= config.daily_max_loss:
+    loss_fraction = state.daily_realized_loss_cny / config.account_equity_cny
+    if loss_fraction >= config.daily_max_loss:
         blockers.append("daily_loss_limit_reached")
     if state.current_drawdown >= config.max_drawdown:
         blockers.append("maximum_drawdown_protection_active")

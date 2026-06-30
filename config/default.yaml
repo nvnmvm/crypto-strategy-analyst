@@ -25,17 +25,21 @@ strategy:
   support_proximity_atr: 1.0
   volume_ratio_threshold: 1.2
   min_confirmations: 2
+  touch_cooldown_bars: 6
+  reaction_atr_multiple: 0.75
+  break_atr_multiple: 0.25
+  target_resistance_buffer_atr: 0.15
+  min_second_target_r_multiple: 2.5
   enable_adx: true
   random_seed: 42
 backtest:
   interval: 4h
   fee_rate: 0.001
   slippage_rate: 0.0005
-  warmup_bars: 220
   train_ratio: 0.6
   validation_ratio: 0.2
   test_ratio: 0.2
 output:
   output_dir: outputs
   log_dir: logs
-
+  risk_state_file: state/risk-state.json

@@ -1,4 +1,4 @@
-"""Support/resistance candidate extraction and zone merging."""
+"""Support/resistance extraction with de-duplicated price interactions."""
 
 from __future__ import annotations
 
@@ -15,6 +15,14 @@ class CandidateLevel:
     price: float
     evidence: str
     timestamp: pd.Timestamp
+
+
+@dataclass(frozen=True, slots=True)
+class ZoneInteractions:
+    touches: int
+    reactions: int
+    breaks: int
+    last_touch: pd.Timestamp
 
 
 def _candidates(frame: pd.DataFrame, swings: list[SwingPoint]) -> list[CandidateLevel]:
@@ -46,14 +54,79 @@ def _candidates(frame: pd.DataFrame, swings: list[SwingPoint]) -> list[Candidate
     return [candidate for candidate in candidates if candidate.price > 0]
 
 
+def _cooldown_events(mask: pd.Series, cooldown_bars: int) -> list[int]:
+    events: list[int] = []
+    last_event = -cooldown_bars
+    was_active = False
+    for position, active in enumerate(mask.to_numpy(dtype=bool)):
+        if active and not was_active and position - last_event >= cooldown_bars:
+            events.append(position)
+            last_event = position
+        was_active = active
+    return events
+
+
+def _interactions(
+    frame: pd.DataFrame,
+    *,
+    lower: float,
+    upper: float,
+    level_type: str,
+    cooldown_bars: int,
+    reaction_atr_multiple: float,
+    break_atr_multiple: float,
+) -> ZoneInteractions:
+    recent = frame.iloc[-200:]
+    contact_mask = (recent["low"] <= upper) & (recent["high"] >= lower)
+    touch_positions = _cooldown_events(contact_mask, cooldown_bars)
+    reactions = 0
+    for position in touch_positions:
+        row = recent.iloc[position]
+        atr = float(row["atr14"])
+        future = recent.iloc[position + 1 : position + cooldown_bars + 1]
+        if future.empty:
+            continue
+        if (
+            level_type == "support"
+            and float(future["high"].max()) - upper >= atr * reaction_atr_multiple
+        ):
+            reactions += 1
+        if (
+            level_type == "resistance"
+            and lower - float(future["low"].min()) >= atr * reaction_atr_multiple
+        ):
+            reactions += 1
+
+    atr_series = recent["atr14"].fillna(float(recent["atr14"].dropna().iloc[-1]))
+    if level_type == "support":
+        break_mask = recent["close"] < lower - atr_series * break_atr_multiple
+    else:
+        break_mask = recent["close"] > upper + atr_series * break_atr_multiple
+    breaks = len(_cooldown_events(break_mask, cooldown_bars))
+    last_touch = (
+        pd.Timestamp(recent.index[touch_positions[-1]])
+        if touch_positions
+        else pd.Timestamp(recent.index[-1])
+    )
+    return ZoneInteractions(
+        touches=max(1, len(touch_positions)),
+        reactions=reactions,
+        breaks=breaks,
+        last_touch=last_touch,
+    )
+
+
 def detect_zones(
     frame: pd.DataFrame,
     swings: list[SwingPoint],
     timeframe: str,
     *,
     merge_percent: float = 0.006,
+    touch_cooldown_bars: int = 6,
+    reaction_atr_multiple: float = 0.75,
+    break_atr_multiple: float = 0.25,
 ) -> tuple[list[PriceZone], list[PriceZone]]:
-    """Merge nearby evidence into support/resistance price zones."""
+    """Merge nearby evidence and score independent touch/reaction/break episodes."""
 
     current_price = float(frame["close"].iloc[-1])
     atr = float(frame["atr14"].iloc[-1])
@@ -71,34 +144,53 @@ def detect_zones(
             clusters.append([candidate])
 
     zones: list[PriceZone] = []
-    touch_tolerance = tolerance * 0.75
     for cluster in clusters:
         center = sum(item.price for item in cluster) / len(cluster)
         lower = min(item.price for item in cluster) - tolerance * 0.35
         upper = max(item.price for item in cluster) + tolerance * 0.35
-        touches_mask = (frame["low"] <= center + touch_tolerance) & (
-            frame["high"] >= center - touch_tolerance
-        )
-        touch_count = max(1, int(touches_mask.iloc[-200:].sum()))
-        touch_indices = frame.index[touches_mask]
-        last_touch = pd.Timestamp(
-            touch_indices[-1] if len(touch_indices) else cluster[-1].timestamp
+        level_type = "support" if center <= current_price else "resistance"
+        stats = _interactions(
+            frame,
+            lower=lower,
+            upper=upper,
+            level_type=level_type,
+            cooldown_bars=touch_cooldown_bars,
+            reaction_atr_multiple=reaction_atr_multiple,
+            break_atr_multiple=break_atr_multiple,
         )
         methods = sorted({item.evidence for item in cluster})
         confluence = len({method.split("_")[0] for method in methods})
-        strength = min(100.0, 12.0 + touch_count * 5.0 + len(methods) * 8.0 + confluence * 4.0)
-        zone_type = "support" if center <= current_price else "resistance"
+        strength = min(
+            100.0,
+            max(
+                0.0,
+                10.0
+                + stats.touches * 4.0
+                + stats.reactions * 10.0
+                - stats.breaks * 12.0
+                + len(methods) * 7.0
+                + confluence * 4.0,
+            ),
+        )
+        evidence = [
+            *methods,
+            f"independent_touches:{stats.touches}",
+            f"effective_reactions:{stats.reactions}",
+            f"effective_breaks:{stats.breaks}",
+        ]
         zones.append(
             PriceZone(
                 lower_price=round(lower, 8),
                 upper_price=round(upper, 8),
                 center_price=round(center, 8),
-                level_type=zone_type,
+                level_type=level_type,
                 timeframe=timeframe,
-                touch_count=touch_count,
-                last_touch_time=last_touch.to_pydatetime(),
+                touch_count=stats.touches,
+                reaction_count=stats.reactions,
+                break_count=stats.breaks,
+                last_touch_time=stats.last_touch.to_pydatetime(),
                 strength_score=round(strength, 2),
-                evidence=methods,
+                evidence=evidence,
             )
         )
     supports = sorted(
@@ -114,7 +206,7 @@ def detect_zones(
 
 
 def merge_timeframe_zones(zones: list[PriceZone], current_price: float) -> list[PriceZone]:
-    """Merge overlapping timeframe zones and reward multi-timeframe confluence."""
+    """Merge overlaps without counting the same price behavior once per timeframe."""
 
     if not zones:
         return []
@@ -138,7 +230,9 @@ def merge_timeframe_zones(zones: list[PriceZone], current_price: float) -> list[
             center_price=center,
             level_type="support" if center <= current_price else "resistance",
             timeframe="+".join(timeframes),
-            touch_count=previous.touch_count + zone.touch_count,
+            touch_count=max(previous.touch_count, zone.touch_count),
+            reaction_count=max(previous.reaction_count, zone.reaction_count),
+            break_count=max(previous.break_count, zone.break_count),
             last_touch_time=max(previous.last_touch_time, zone.last_touch_time),
             strength_score=min(100, max(previous.strength_score, zone.strength_score) + 10),
             evidence=evidence,

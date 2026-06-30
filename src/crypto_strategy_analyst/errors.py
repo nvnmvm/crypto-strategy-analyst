@@ -15,3 +15,7 @@ class MarketDataError(CryptoStrategyError):
 
 class InsufficientDataError(MarketDataError):
     """Raised when a calculation lacks enough historical bars."""
+
+
+class RiskStateError(CryptoStrategyError):
+    """Raised when persisted risk state is missing required integrity."""

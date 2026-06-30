@@ -9,5 +9,5 @@ build/
 dist/
 outputs/
 logs/
+state/
 .DS_Store
-

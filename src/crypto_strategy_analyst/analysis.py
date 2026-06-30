@@ -1,83 +1,43 @@
-"""Multi-timeframe analysis orchestration."""
+"""Current-time analysis built on the shared strategy evaluator."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import UTC, datetime
+
+import pandas as pd
 
 from .config import AppConfig
 from .data import BinancePublicClient, drop_incomplete_last_bar, validate_market_data
-from .indicators import add_indicators, snapshot
-from .levels import detect_zones, merge_timeframe_zones
-from .models import AnalysisReport, QualityGrade
+from .models import AnalysisReport, DataQuality, QualityGrade
 from .risk import RiskState, calculate_position
-from .signal import generate_signal
-from .structure import classify_trend, detect_confirmed_swings
+from .strategy import (
+    REQUIRED_TIMEFRAMES,
+    SetupEvaluation,
+    evaluate_setup_at_time,
+    prepare_market_frames,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 
-def analyze_symbol(
+def _build_report(
     symbol: str,
     config: AppConfig,
-    *,
-    client: BinancePublicClient | None = None,
-    risk_state: RiskState | None = None,
+    evaluation: SetupEvaluation,
+    quality: dict[str, DataQuality],
 ) -> AnalysisReport:
-    """Fetch, validate, analyze, risk-size, and build one typed report."""
-
-    market_client = client or BinancePublicClient(config.market)
-    frames = {}
-    quality = {}
-    trends = {}
-    indicators = {}
-    timeframe_zones = []
-    for timeframe in ("1d", "4h", "1h"):
-        raw = market_client.fetch_klines(symbol, timeframe, limit=config.market.history_limit)
-        completed = drop_incomplete_last_bar(raw, timeframe)
-        quality[timeframe] = validate_market_data(completed, timeframe)
-        enriched = add_indicators(completed, enable_adx=config.strategy.enable_adx)
-        frames[timeframe] = enriched
-        swings = detect_confirmed_swings(
-            enriched,
-            left=config.strategy.swing_left,
-            right=config.strategy.swing_right,
-        )
-        trends[timeframe] = classify_trend(enriched, swings)
-        indicators[timeframe] = snapshot(enriched, enable_adx=config.strategy.enable_adx)
-        supports, resistances = detect_zones(
-            enriched,
-            swings,
-            timeframe,
-            merge_percent=config.strategy.level_merge_percent,
-        )
-        timeframe_zones.extend([*supports[:5], *resistances[:5]])
-
-    current_price = float(frames["4h"]["close"].iloc[-1])
-    merged = merge_timeframe_zones(timeframe_zones, current_price)
-    supports = sorted(
-        (zone for zone in merged if zone.level_type == "support"),
-        key=lambda zone: zone.center_price,
-        reverse=True,
-    )[:8]
-    resistances = sorted(
-        (zone for zone in merged if zone.level_type == "resistance"),
-        key=lambda zone: zone.center_price,
-    )[:8]
-    complete = all(item.grade == QualityGrade.VALID for item in quality.values())
-    decision = generate_signal(
-        daily_trend=trends["1d"],
-        four_hour_trend=trends["4h"],
-        one_hour_frame=frames["1h"],
-        four_hour_frame=frames["4h"],
-        supports=supports,
-        resistances=resistances,
-        data_is_complete=complete,
-        config=config,
-        risk_state=risk_state,
-    )
+    decision = evaluation.decision
+    current_price = float(evaluation.frames["4h"]["close"].iloc[-1])
     position = None
-    if decision.entry_zone and decision.stop_loss and decision.label.value.endswith("candidate"):
+    if (
+        decision.entry_zone
+        and decision.stop_loss
+        and decision.take_profit_1
+        and decision.take_profit_2
+        and decision.label.value.endswith("candidate")
+    ):
         position = calculate_position(
             entry_price=current_price,
             stop_price=decision.stop_loss,
@@ -90,27 +50,27 @@ def analyze_symbol(
     warnings.extend(f"{tf}: {issue}" for tf, item in quality.items() for issue in item.issues)
     warnings.extend(f"阻断条件：{blocker}" for blocker in decision.blockers)
     reasons = [
-        f"日线趋势={trends['1d'].value}",
-        f"4小时趋势={trends['4h'].value}",
+        f"日线趋势={evaluation.trends['1d'].value}",
+        f"4小时趋势={evaluation.trends['4h'].value}",
         *decision.confirmations,
     ]
     if not decision.confirmations:
         reasons.append("未满足足够的确定性确认条件")
-    report = AnalysisReport(
-        generated_at=datetime.now(UTC),
+    return AnalysisReport(
+        generated_at=evaluation.evaluated_at,
         symbol=symbol.upper().replace("-", "/"),
         data_source="Binance public spot REST /api/v3/klines (completed candles only)",
-        analysis_timeframes=["1d", "4h", "1h"],
+        analysis_timeframes=list(REQUIRED_TIMEFRAMES),
         current_price=current_price,
         data_quality=quality,
-        daily_trend=trends["1d"],
-        four_hour_trend=trends["4h"],
+        daily_trend=evaluation.trends["1d"],
+        four_hour_trend=evaluation.trends["4h"],
         one_hour_confirmation=(
             "、".join(item for item in decision.confirmations if item) or "没有足够的入场确认"
         ),
-        support_zones=supports,
-        resistance_zones=resistances,
-        indicators=indicators,
+        support_zones=evaluation.supports,
+        resistance_zones=evaluation.resistances,
+        indicators=evaluation.indicators,
         signal=decision.label,
         signal_score=decision.score,
         score_breakdown=decision.breakdown,
@@ -128,7 +88,7 @@ def analyze_symbol(
         invalidation_conditions=[
             "日线趋势转为 bearish",
             "关键支撑区域被有效跌破",
-            "盈亏比低于 2:1 或上方阻力过近",
+            "最近关键阻力无法同时容纳合规 TP1 与 TP2",
             "单日两次止损、单日亏损达到 2% 或最大回撤达到 10%",
             "任何必需周期出现数据缺口、重复、倒序或 OHLC 异常",
         ],
@@ -140,6 +100,67 @@ def analyze_symbol(
             "machine_learning_model": "not_available",
         },
         warnings=warnings,
+    )
+
+
+def analyze_frames_at_time(
+    symbol: str,
+    frames: Mapping[str, pd.DataFrame],
+    config: AppConfig,
+    *,
+    evaluated_at: datetime,
+    risk_state: RiskState | None = None,
+) -> AnalysisReport:
+    """Analyze supplied frames exactly as they were visible at a historical/current time."""
+
+    prepared = prepare_market_frames(frames, config)
+    visible_quality: dict[str, DataQuality] = {}
+    for timeframe in REQUIRED_TIMEFRAMES:
+        close_delta = pd.Timedelta(seconds={"1d": 86_400, "4h": 14_400, "1h": 3_600}[timeframe])
+        timestamp = pd.Timestamp(evaluated_at)
+        timestamp = (
+            timestamp.tz_localize("UTC")
+            if timestamp.tzinfo is None
+            else timestamp.tz_convert("UTC")
+        )
+        visible = (
+            frames[timeframe]
+            .loc[frames[timeframe].index + close_delta <= timestamp]
+            .tail(config.market.history_limit)
+        )
+        visible_quality[timeframe] = validate_market_data(visible, timeframe)
+    complete = all(item.grade == QualityGrade.VALID for item in visible_quality.values())
+    evaluation = evaluate_setup_at_time(
+        prepared,
+        config,
+        evaluated_at=evaluated_at,
+        risk_state=risk_state,
+        data_is_complete=complete,
+    )
+    return _build_report(symbol, config, evaluation, visible_quality)
+
+
+def analyze_symbol(
+    symbol: str,
+    config: AppConfig,
+    *,
+    client: BinancePublicClient | None = None,
+    risk_state: RiskState | None = None,
+) -> AnalysisReport:
+    """Fetch public frames and run the same evaluator used by backtests."""
+
+    market_client = client or BinancePublicClient(config.market)
+    as_of = datetime.now(UTC)
+    frames: dict[str, pd.DataFrame] = {}
+    for timeframe in REQUIRED_TIMEFRAMES:
+        raw = market_client.fetch_klines(symbol, timeframe, limit=config.market.history_limit)
+        frames[timeframe] = drop_incomplete_last_bar(raw, timeframe, now=as_of)
+    report = analyze_frames_at_time(
+        symbol,
+        frames,
+        config,
+        evaluated_at=as_of,
+        risk_state=risk_state,
     )
     LOGGER.info(
         "analysis completed",

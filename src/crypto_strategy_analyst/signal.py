@@ -1,4 +1,4 @@
-"""Deterministic candidate scoring and hard eligibility rules."""
+"""Deterministic candidate scoring and resistance-aware targets."""
 
 from __future__ import annotations
 
@@ -48,9 +48,9 @@ def generate_signal(
     config: AppConfig,
     risk_state: RiskState | None = None,
 ) -> SignalDecision:
-    """Score the latest setup without model judgment or future bars."""
+    """Score one completed-bar setup without model judgment or future bars."""
 
-    risk_state = risk_state or RiskState()
+    risk_state = risk_state or RiskState(peak_equity_cny=config.risk.account_equity_cny)
     current = four_hour_frame.iloc[-1]
     previous = four_hour_frame.iloc[-2]
     current_price, atr = float(current["close"]), float(current["atr14"])
@@ -62,7 +62,8 @@ def generate_signal(
     ]
     entry_zone = max(nearby_supports, key=lambda zone: zone.strength_score, default=None)
     next_resistance = next(
-        (zone for zone in resistances if zone.center_price > current_price), None
+        (zone for zone in resistances if zone.upper_price > current_price),
+        None,
     )
 
     confirmations: list[str] = []
@@ -87,9 +88,17 @@ def generate_signal(
     if entry_zone and "+" in entry_zone.timeframe:
         confirmations.append("multi_timeframe_support")
 
-    trend_points = (
-        20.0 if daily_trend == Trend.BULLISH else 12.0 if daily_trend == Trend.SIDEWAYS else 0.0
+    daily_points = (
+        14.0 if daily_trend == Trend.BULLISH else 8.0 if daily_trend == Trend.SIDEWAYS else 0.0
     )
+    four_hour_points = (
+        6.0
+        if four_hour_trend == Trend.BULLISH
+        else 3.0
+        if four_hour_trend == Trend.SIDEWAYS
+        else 0.0
+    )
+    trend_points = daily_points + four_hour_points
     level_points = min(25.0, entry_zone.strength_score * 0.25) if entry_zone else 0.0
     candle_points = 15.0 if candle_ok else 0.0
     volume_points = 15.0 if "volume_expansion_rebound" in confirmations else 0.0
@@ -106,15 +115,30 @@ def generate_signal(
     target_2: float | None = None
     reward_risk: float | None = None
     space_points = 0.0
+    target_blockers: list[str] = []
     if entry_zone:
         stop_loss = min(entry_zone.lower_price - atr * 0.5, current_price - atr)
         if stop_loss > 0 and stop_loss < current_price:
             one_r = current_price - stop_loss
-            target_1 = current_price + config.risk.min_reward_risk * one_r
-            target_2 = current_price + (config.risk.min_reward_risk + 1.0) * one_r
-            available_target = next_resistance.lower_price if next_resistance else target_2
-            reward_risk = max(0.0, (available_target - current_price) / one_r)
-            space_points = min(10.0, reward_risk / config.risk.min_reward_risk * 10.0)
+            if next_resistance is None:
+                target_blockers.append("no_key_resistance_for_targets")
+            else:
+                resistance_cap = next_resistance.lower_price - (
+                    atr * config.strategy.target_resistance_buffer_atr
+                )
+                available_r = (resistance_cap - current_price) / one_r
+                reward_risk = max(0.0, available_r)
+                space_points = min(10.0, reward_risk / config.risk.min_reward_risk * 10.0)
+                if available_r < config.risk.min_reward_risk:
+                    target_blockers.append("resistance_space_below_two_r")
+                else:
+                    target_1 = min(
+                        current_price + config.risk.min_reward_risk * one_r, resistance_cap
+                    )
+                    if available_r >= config.strategy.min_second_target_r_multiple:
+                        target_2 = min(current_price + 3.0 * one_r, resistance_cap)
+                    else:
+                        target_blockers.append("second_target_unavailable_before_resistance")
 
     breakdown = ScoreBreakdown(
         higher_timeframe_trend=trend_points,
@@ -126,33 +150,39 @@ def generate_signal(
         sentiment_adjustment=0.0,
     )
     score = breakdown.total
-    blockers = risk_blockers(config.risk, risk_state)
+    blockers = [*risk_blockers(config.risk, risk_state), *target_blockers]
     if not data_is_complete:
         blockers.append("required_market_data_incomplete")
     if daily_trend == Trend.BEARISH:
         blockers.append("daily_trend_bearish")
+    if four_hour_trend == Trend.BEARISH:
+        blockers.append("four_hour_trend_bearish")
     if entry_zone is None:
         blockers.append("not_near_key_support")
     if len(confirmations) < config.strategy.min_confirmations:
         blockers.append("fewer_than_two_confirmations")
-    if reward_risk is None or reward_risk < config.risk.min_reward_risk:
-        blockers.append("reward_risk_below_minimum_or_resistance_too_close")
+    if (
+        reward_risk is None or reward_risk < config.risk.min_reward_risk
+    ) and "resistance_space_below_two_r" not in blockers:
+        blockers.append("reward_risk_below_minimum")
+
     label = _label_for_score(score)
-    if blockers:
-        label = (
-            SignalLabel.NO_TRADE
-            if any(
-                blocker in blockers
-                for blocker in (
-                    "required_market_data_incomplete",
-                    "daily_trend_bearish",
-                    "daily_stop_count_reached",
-                    "daily_loss_limit_reached",
-                    "maximum_drawdown_protection_active",
-                )
-            )
-            else SignalLabel.WATCH
-        )
+    hard_blockers = {
+        "required_market_data_incomplete",
+        "daily_trend_bearish",
+        "daily_stop_count_reached",
+        "daily_loss_limit_reached",
+        "maximum_drawdown_protection_active",
+        "resistance_space_below_two_r",
+        "no_key_resistance_for_targets",
+    }
+    if any(blocker in hard_blockers for blocker in blockers):
+        label = SignalLabel.NO_TRADE
+    elif blockers:
+        label = SignalLabel.WATCH
+    if target_1 is None or target_2 is None:
+        label = SignalLabel.NO_TRADE if label == SignalLabel.NO_TRADE else SignalLabel.WATCH
+
     return SignalDecision(
         label=label,
         score=score,

@@ -1,6 +1,6 @@
 # crypto-strategy-analyst
 
-一个只做研究、不做下单的 OpenClaw Skill。它使用 Binance 公开现货 K 线，对 BTC/USDT、ETH/USDT 做日线/4 小时/1 小时分析，输出确定性候选信号、风控仓位、中文 Markdown、JSON 和严格时间推进回测。
+一个只做研究、不做下单的 OpenClaw Skill。它使用 Binance 公开现货 K 线，对 BTC/USDT、ETH/USDT 做日线/4 小时/1 小时分析，输出确定性候选信号、持久化风控仓位、中文 Markdown、JSON 和严格三周期时间重放回测。实时分析与回测共用 `evaluate_setup_at_time`，不维护第二套简化策略。
 
 ## 安全边界
 
@@ -41,6 +41,10 @@ crypto-strategy-analyst latest --output-dir outputs
 ```
 
 默认参数在 `config/default.yaml`，示例覆盖在 `config/example.yaml`。核心逻辑在 `src/crypto_strategy_analyst`；`scripts` 只提供薄入口。
+
+风险状态默认原子保存到 `state/risk-state.json`，包含 UTC 日期、当日止损次数、当日已实现亏损、峰值权益和当前回撤。文件损坏时系统会失败关闭，不会静默重置保护条件。
+
+回测输出的 `time_splits` 只是固定 60%/20%/20% 时间切分，不是滚动 walk-forward，也不进行自动参数优化。
 
 ## 质量检查
 

@@ -14,11 +14,12 @@ Do not use it for live orders, private exchange APIs, API keys, leverage, future
 
 1. Check Python and dependencies with `python3 -c "import sys, crypto_strategy_analyst; assert sys.version_info >= (3, 11)"`. If unavailable, stop and ask the operator to use Python 3.11+ and run `python3 -m pip install '{baseDir}'`; never install packages silently.
 2. Fetch only public Binance spot OHLCV through `{baseDir}/scripts/fetch_market_data.py` or run the complete pipeline with `{baseDir}/scripts/analyze_market.py`.
-3. Validate UTC ordering, duplicates, OHLC consistency, time gaps, and minimum history before analysis. If any required timeframe is invalid or has a gap, stop trade-candidate generation and report the data problem.
-4. Evaluate in fixed order: daily trend, daily levels, four-hour setup, one-hour confirmation, deterministic score, reward/risk, risk controls, position size, then report.
-5. Treat 1h only as confirmation. Never let it override a bearish daily trend.
-6. Require at least two entry confirmations, reward/risk of at least 2:1, sufficient space to resistance, no daily stop, no daily loss lock, and no drawdown lock.
-7. Save a timestamped JSON and Chinese Markdown report. Include UTC generation time, Binance public-data provenance, missing optional sources as `not_available`, and the disclaimer “策略研究结果，不是收益保证，也不是投资建议”。
+3. Load `{baseDir}`-configured persistent risk state before analysis. Treat corrupt state as a hard error; reset only daily fields when the UTC date changes.
+4. Validate UTC ordering, duplicates, OHLC consistency, time gaps, and minimum history before analysis. If any required timeframe is invalid or has a gap, stop trade-candidate generation and report the data problem.
+5. Call the shared `evaluate_setup_at_time` workflow in fixed order: closed daily trend and levels, closed four-hour setup, closed one-hour confirmation, deterministic score, resistance-aware reward/risk, risk controls, position size, then report. Backtests must call the same evaluator.
+6. Treat 1h only as confirmation. Never let it override a bearish daily trend.
+7. Require at least two entry confirmations, reward/risk of at least 2:1, two feasible targets before the nearest resistance, no daily stop, no daily loss lock, and no drawdown lock.
+8. Save a timestamped JSON and Chinese Markdown report. Include UTC generation time, Binance public-data provenance, missing optional sources as `not_available`, and the disclaimer “策略研究结果，不是收益保证，也不是投资建议”。
 
 ## Commands
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,7 @@ from .indicators import add_indicators
 from .levels import detect_zones
 from .logging_utils import configure_logging
 from .report import find_latest, save_analysis, save_backtest
-from .risk import calculate_position
+from .risk import RiskStateStore, calculate_position
 from .structure import classify_trend, detect_confirmed_swings
 
 
@@ -47,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze = subparsers.add_parser("analyze", help="Run full multi-timeframe analysis")
     analyze.add_argument("--symbol", required=True)
     analyze.add_argument("--output-dir")
+    analyze.add_argument("--risk-state", help="Persistent risk-state JSON path")
     _add_common(analyze)
 
     compare = subparsers.add_parser(
@@ -54,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare.add_argument("--symbols", nargs="+", default=["BTC/USDT", "ETH/USDT"])
     compare.add_argument("--output-dir")
+    compare.add_argument("--risk-state", help="Persistent risk-state JSON path")
     _add_common(compare)
 
     backtest = subparsers.add_parser("backtest", help="Run strict time-forward 4h backtest")
@@ -114,7 +117,13 @@ def execute(args: argparse.Namespace) -> int:
     client = BinancePublicClient(config.market)
 
     if args.command == "analyze":
-        report = analyze_symbol(args.symbol, config, client=client)
+        risk_store = RiskStateStore(args.risk_state or config.output.risk_state_file)
+        risk_state = risk_store.load(
+            current_date=datetime.now(UTC).date(),
+            initial_equity_cny=config.risk.account_equity_cny,
+        ).with_equity(config.risk.account_equity_cny)
+        report = analyze_symbol(args.symbol, config, client=client, risk_state=risk_state)
+        risk_store.save(risk_state)
         json_path, markdown_path = save_analysis(report, output_dir)
         _json_print(
             {
@@ -126,9 +135,14 @@ def execute(args: argparse.Namespace) -> int:
         )
         return 0
     if args.command == "compare":
+        risk_store = RiskStateStore(args.risk_state or config.output.risk_state_file)
+        risk_state = risk_store.load(
+            current_date=datetime.now(UTC).date(),
+            initial_equity_cny=config.risk.account_equity_cny,
+        ).with_equity(config.risk.account_equity_cny)
         rows = []
         for symbol in args.symbols:
-            report = analyze_symbol(symbol, config, client=client)
+            report = analyze_symbol(symbol, config, client=client, risk_state=risk_state)
             paths = save_analysis(report, output_dir)
             rows.append(
                 {
@@ -140,23 +154,37 @@ def execute(args: argparse.Namespace) -> int:
                 }
             )
         rows.sort(key=lambda row: float(row["score"]), reverse=True)
+        risk_store.save(risk_state)
         _json_print({"ranking": rows, "note": "评分只是确定性候选排序，不是收益预测。"})
         return 0
     if args.command == "backtest":
-        frame = client.fetch_klines(
-            args.symbol,
-            config.backtest.interval,
-            start=args.start,
-            end=args.end,
-            limit=args.limit,
-        )
-        frame = drop_incomplete_last_bar(frame, config.backtest.interval)
-        quality = validate_market_data(
-            frame, config.backtest.interval, minimum_bars=config.backtest.warmup_bars + 3
-        )
-        if quality.grade.value == "invalid" or quality.gap_count:
-            raise CryptoStrategyError(f"backtest data failed quality gate: {quality.model_dump()}")
-        result = run_backtest(frame, args.symbol, config)
+        frames: dict[str, pd.DataFrame] = {}
+        warmup_days = {"1d": 365, "4h": 60, "1h": 15}
+        for timeframe in ("1d", "4h", "1h"):
+            fetch_start = None
+            if args.start:
+                requested_start = pd.Timestamp(args.start)
+                requested_start = (
+                    requested_start.tz_localize("UTC")
+                    if requested_start.tzinfo is None
+                    else requested_start.tz_convert("UTC")
+                )
+                fetch_start = requested_start - pd.Timedelta(days=warmup_days[timeframe])
+            frame = client.fetch_klines(
+                args.symbol,
+                timeframe,
+                start=fetch_start.to_pydatetime() if fetch_start is not None else None,
+                end=args.end,
+                limit=args.limit,
+            )
+            frame = drop_incomplete_last_bar(frame, timeframe)
+            quality = validate_market_data(frame, timeframe, minimum_bars=210)
+            if quality.grade.value == "invalid" or quality.gap_count:
+                raise CryptoStrategyError(
+                    f"backtest {timeframe} data failed quality gate: {quality.model_dump()}"
+                )
+            frames[timeframe] = frame
+        result = run_backtest(frames, args.symbol, config, start=args.start, end=args.end)
         path = save_backtest(result, output_dir)
         _json_print({"result": str(path), "metrics": result.metrics.model_dump()})
         return 0

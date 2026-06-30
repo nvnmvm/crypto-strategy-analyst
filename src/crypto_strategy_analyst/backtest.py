@@ -1,7 +1,8 @@
-"""Strict time-forward, long-only spot backtest engine."""
+"""Strict three-timeframe replay using the shared strategy evaluator."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -9,8 +10,17 @@ import numpy as np
 import pandas as pd
 
 from .config import AppConfig
-from .indicators import add_indicators
-from .models import BacktestMetrics, BacktestResult, TradeRecord, Trend
+from .models import BacktestMetrics, BacktestResult, SignalLabel, TradeRecord, Trend
+from .risk import RiskState
+from .strategy import SetupEvaluation, evaluate_setup_at_time, prepare_market_frames
+
+
+@dataclass(slots=True)
+class _PendingEntry:
+    stop: float
+    target_1: float
+    target_2: float
+    regime: Trend
 
 
 @dataclass(slots=True)
@@ -32,71 +42,30 @@ class _Position:
     regime: Trend
 
 
-def _trend_from_row(row: pd.Series) -> Trend:
-    score = 0
-    if row["ema20"] > row["ema50"] > row["ema200"]:
-        score += 2
-    elif row["ema20"] < row["ema50"] < row["ema200"]:
-        score -= 2
-    score += 1 if row["close"] > row["ema200"] else -1
-    score += 1 if row["macd_histogram"] > 0 else -1
-    return Trend.BULLISH if score >= 3 else Trend.BEARISH if score <= -3 else Trend.SIDEWAYS
+def _utc_timestamp(value: str | datetime | None) -> pd.Timestamp | None:
+    if value is None:
+        return None
+    timestamp = pd.Timestamp(value)
+    return timestamp.tz_localize("UTC") if timestamp.tzinfo is None else timestamp.tz_convert("UTC")
 
 
-def _daily_trends(frame: pd.DataFrame, enable_adx: bool) -> pd.Series:
-    rules = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-    daily = frame[list(rules)].resample("1D", label="left", closed="left").agg(rules).dropna()
-    if len(daily) < 200:
-        return pd.Series(index=frame.index, data=Trend.SIDEWAYS.value, dtype="object")
-    daily_indicators = add_indicators(daily, enable_adx=enable_adx)
-    trend_values = daily_indicators.apply(_trend_from_row, axis=1).astype(str)
-    available = pd.DataFrame(
-        {
-            "available_at": trend_values.index + pd.Timedelta(days=1),
-            "daily_trend": trend_values.values,
-        }
-    ).sort_values("available_at")
-    bars = pd.DataFrame({"timestamp": frame.index}).sort_values("timestamp")
-    joined = pd.merge_asof(
-        bars,
-        available,
-        left_on="timestamp",
-        right_on="available_at",
-        direction="backward",
+def evaluate_backtest_at_time(
+    frames: Mapping[str, pd.DataFrame],
+    config: AppConfig,
+    *,
+    evaluated_at: datetime,
+    risk_state: RiskState | None = None,
+) -> SetupEvaluation:
+    """Expose the exact evaluator used during replay for consistency tests and audits."""
+
+    prepared = prepare_market_frames(frames, config)
+    return evaluate_setup_at_time(
+        prepared,
+        config,
+        evaluated_at=evaluated_at,
+        risk_state=risk_state,
+        data_is_complete=True,
     )
-    values = joined["daily_trend"].fillna(Trend.SIDEWAYS.value).to_numpy()
-    return pd.Series(values, index=frame.index, dtype="object")
-
-
-def _entry_setup(
-    frame: pd.DataFrame, index: int, daily_trend: Trend, config: AppConfig
-) -> dict[str, float] | None:
-    row, previous = frame.iloc[index], frame.iloc[index - 1]
-    if daily_trend == Trend.BEARISH or _trend_from_row(row) == Trend.BEARISH:
-        return None
-    support = float(frame["low"].iloc[max(0, index - 30) : index].min())
-    resistance = float(frame["high"].iloc[max(0, index - 80) : index].max())
-    atr, close = float(row["atr14"]), float(row["close"])
-    near_support = close - support <= atr * 1.5
-    confirmations = sum(
-        (
-            bool(row["rsi14"] > previous["rsi14"] and row["rsi14"] <= 55),
-            bool(row["macd_histogram"] > previous["macd_histogram"]),
-            bool(
-                row["volume_ratio"] >= config.strategy.volume_ratio_threshold
-                and row["close"] > previous["close"]
-            ),
-            bool(previous["close"] <= previous["ema20"] and row["close"] > row["ema20"]),
-            bool(row["close"] > row["open"] and row["close"] > previous["close"]),
-        )
-    )
-    stop = min(support - atr * 0.25, close - atr)
-    if not near_support or confirmations < config.strategy.min_confirmations or stop <= 0:
-        return None
-    one_r = close - stop
-    if one_r <= 0 or (resistance - close) / one_r < config.risk.min_reward_risk:
-        return None
-    return {"stop": stop, "one_r": one_r}
 
 
 def _streak(values: list[bool], target: bool) -> int:
@@ -129,9 +98,13 @@ def _metrics(
     drawdown = equity / equity.cummax() - 1
     bar_returns = equity.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
     bars_per_year = 365.25 * 6
-    std = float(bar_returns.std(ddof=1))
+    standard_deviation = float(bar_returns.std(ddof=1))
     downside = float(bar_returns[bar_returns < 0].std(ddof=1))
-    sharpe = float(bar_returns.mean()) / std * np.sqrt(bars_per_year) if std > 0 else 0.0
+    sharpe = (
+        float(bar_returns.mean()) / standard_deviation * np.sqrt(bars_per_year)
+        if standard_deviation > 0
+        else 0.0
+    )
     sortino = float(bar_returns.mean()) / downside * np.sqrt(bars_per_year) if downside > 0 else 0.0
     wins = [trade.pnl for trade in trades if trade.pnl > 0]
     losses = [-trade.pnl for trade in trades if trade.pnl < 0]
@@ -159,7 +132,9 @@ def _metrics(
     )
 
 
-def _split_results(equity: pd.Series, config: AppConfig) -> dict[str, dict[str, object]]:
+def _time_split_results(equity: pd.Series, config: AppConfig) -> dict[str, dict[str, object]]:
+    """Report fixed chronological splits; this is not walk-forward optimization."""
+
     length = len(equity)
     train_end = max(1, int(length * config.backtest.train_ratio))
     validation_end = max(
@@ -184,55 +159,91 @@ def _split_results(equity: pd.Series, config: AppConfig) -> dict[str, dict[str, 
     return result
 
 
-def run_backtest(frame: pd.DataFrame, symbol: str, config: AppConfig) -> BacktestResult:
-    """Run one deterministic, next-bar execution backtest on completed 4h bars."""
+def _record_closed_trade(
+    *,
+    position: _Position,
+    symbol: str,
+    timestamp: pd.Timestamp,
+    exit_reason: str,
+    rate: float,
+) -> TradeRecord:
+    pnl_quote = position.exit_proceeds - position.entry_cost
+    return TradeRecord(
+        symbol=symbol,
+        entry_time=position.entry_time.to_pydatetime(),
+        exit_time=timestamp.to_pydatetime(),
+        entry_price=position.entry_price,
+        exit_price=(position.exit_proceeds + position.fees) / position.original_quantity,
+        quantity=position.original_quantity,
+        pnl=pnl_quote * rate,
+        return_pct=pnl_quote / position.entry_cost,
+        fees=position.fees * rate,
+        slippage_cost=position.slippage * rate,
+        holding_hours=(timestamp - position.entry_time).total_seconds() / 3600,
+        exit_reason=exit_reason,
+        market_regime=position.regime,
+    )
 
-    enriched = add_indicators(frame.copy(), enable_adx=config.strategy.enable_adx).dropna(
-        subset=["ema200", "atr14", "rsi14"]
+
+def run_backtest(
+    frames: Mapping[str, pd.DataFrame],
+    symbol: str,
+    config: AppConfig,
+    *,
+    start: str | datetime | None = None,
+    end: str | datetime | None = None,
+    decision_observer: Callable[[datetime, SetupEvaluation], None] | None = None,
+) -> BacktestResult:
+    """Replay completed 1d/4h/1h candles and execute shared evaluator decisions next bar."""
+
+    prepared = prepare_market_frames(frames, config)
+    four_hour = prepared["4h"]
+    earliest = max(
+        prepared["1d"].index[209] + pd.Timedelta(days=1),
+        prepared["4h"].index[209] + pd.Timedelta(hours=4),
+        prepared["1h"].index[209] + pd.Timedelta(hours=1),
     )
-    if len(enriched) <= config.backtest.warmup_bars + 2:
-        raise ValueError("backtest requires more bars than warmup_bars")
-    daily_trends = (
-        _daily_trends(frame, config.strategy.enable_adx)
-        .reindex(enriched.index)
-        .fillna(Trend.SIDEWAYS.value)
+    start_time = max(filter(None, [earliest, _utc_timestamp(start)]))
+    end_time = _utc_timestamp(end) or four_hour.index[-1] + pd.Timedelta(hours=4)
+    bar_close_times = four_hour.index + pd.Timedelta(hours=4)
+    replay_positions = np.flatnonzero(
+        (bar_close_times >= start_time) & (bar_close_times <= end_time)
     )
+    if len(replay_positions) < 3:
+        raise ValueError("backtest range must contain at least three replay bars after warmup")
+
     rate = config.risk.cny_per_usdt
     initial_quote = config.risk.account_equity_cny / rate
     cash = initial_quote
-    peak_equity = initial_quote
     position: _Position | None = None
-    pending: dict[str, float | Trend] | None = None
+    pending: _PendingEntry | None = None
     trades: list[TradeRecord] = []
     equity_values: list[float] = []
     equity_times: list[pd.Timestamp] = []
     total_fees = total_slippage = 0.0
-    current_day = None
-    daily_stops = 0
-    day_start_equity = initial_quote
-    day_realized_loss = 0.0
+    risk_state = RiskState(
+        date=start_time.date(),
+        peak_equity_cny=config.risk.account_equity_cny,
+    )
 
-    for index in range(config.backtest.warmup_bars, len(enriched)):
-        timestamp, row = pd.Timestamp(enriched.index[index]), enriched.iloc[index]
-        if current_day != timestamp.date():
-            current_day = timestamp.date()
-            daily_stops = 0
-            day_realized_loss = 0.0
-            day_start_equity = cash + (
-                position.remaining_quantity * float(row["open"]) if position else 0.0
-            )
+    for replay_index, index in enumerate(replay_positions):
+        timestamp = pd.Timestamp(four_hour.index[index])
+        close_time = timestamp + pd.Timedelta(hours=4)
+        row = four_hour.iloc[index]
+        risk_state = risk_state.rolled_to(close_time.date())
 
         if pending is not None and position is None:
             raw_open = float(row["open"])
             entry_price = raw_open * (1 + config.backtest.slippage_rate)
-            stop = float(pending["stop"])
-            if stop < entry_price:
+            valid_targets = pending.stop < entry_price < pending.target_1 < pending.target_2
+            if valid_targets:
                 equity_before = cash
                 risk_quote = equity_before * config.risk.risk_per_trade
-                quantity_by_risk = risk_quote / (entry_price - stop)
+                quantity_by_risk = risk_quote / (entry_price - pending.stop)
                 quantity_by_cash = cash / (entry_price * (1 + config.backtest.fee_rate))
                 quantity = min(
-                    quantity_by_risk, quantity_by_cash * config.risk.max_position_fraction
+                    quantity_by_risk,
+                    quantity_by_cash * config.risk.max_position_fraction,
                 )
                 if quantity > 0:
                     notional = quantity * entry_price
@@ -241,23 +252,22 @@ def run_backtest(frame: pd.DataFrame, symbol: str, config: AppConfig) -> Backtes
                     cash -= notional + fee
                     total_fees += fee
                     total_slippage += slip
-                    one_r = entry_price - stop
                     position = _Position(
                         entry_time=timestamp,
                         entry_index=index,
                         entry_price=entry_price,
                         original_quantity=quantity,
                         remaining_quantity=quantity,
-                        stop_price=stop,
-                        target_1=entry_price + config.risk.min_reward_risk * one_r,
-                        target_2=entry_price + (config.risk.min_reward_risk + 1) * one_r,
+                        stop_price=pending.stop,
+                        target_1=pending.target_1,
+                        target_2=pending.target_2,
                         target_1_done=False,
                         target_2_done=False,
                         entry_cost=notional + fee,
                         exit_proceeds=0.0,
                         fees=fee,
                         slippage=slip,
-                        regime=Trend(str(pending["regime"])),
+                        regime=pending.regime,
                     )
             pending = None
 
@@ -279,7 +289,7 @@ def run_backtest(frame: pd.DataFrame, symbol: str, config: AppConfig) -> Backtes
                 total_slippage += slip
                 position.remaining_quantity = 0.0
                 closed_reason = (
-                    "stop_loss" if index > position.entry_index else "entry_bar_protective_stop"
+                    "entry_bar_protective_stop" if index == position.entry_index else "stop_loss"
                 )
             elif index > position.entry_index:
                 if not position.target_1_done and high >= position.target_1:
@@ -320,58 +330,58 @@ def run_backtest(frame: pd.DataFrame, symbol: str, config: AppConfig) -> Backtes
                             row["close"] - row["atr14"] * config.risk.trailing_atr_multiple
                         )
                     else:
-                        trailing = float(enriched["low"].iloc[max(0, index - 10) : index].min())
+                        trailing = float(four_hour["low"].iloc[max(0, index - 10) : index].min())
                     position.stop_price = max(position.stop_price, trailing)
 
             if position is not None and position.remaining_quantity <= 1e-12:
-                pnl_quote = position.exit_proceeds - position.entry_cost
-                if closed_reason and "stop" in closed_reason and pnl_quote < 0:
-                    daily_stops += 1
-                    day_realized_loss += -pnl_quote
-                gross_exit_quantity = position.original_quantity
-                average_exit = (position.exit_proceeds + position.fees) / gross_exit_quantity
-                trades.append(
-                    TradeRecord(
-                        symbol=symbol,
-                        entry_time=position.entry_time.to_pydatetime(),
-                        exit_time=timestamp.to_pydatetime(),
-                        entry_price=position.entry_price,
-                        exit_price=average_exit,
-                        quantity=position.original_quantity,
-                        pnl=pnl_quote * rate,
-                        return_pct=pnl_quote / position.entry_cost,
-                        fees=position.fees * rate,
-                        slippage_cost=position.slippage * rate,
-                        holding_hours=(timestamp - position.entry_time).total_seconds() / 3600,
-                        exit_reason=closed_reason or "completed_exit",
-                        market_regime=position.regime,
-                    )
+                trade = _record_closed_trade(
+                    position=position,
+                    symbol=symbol,
+                    timestamp=timestamp,
+                    exit_reason=closed_reason or "completed_exit",
+                    rate=rate,
+                )
+                trades.append(trade)
+                risk_state = risk_state.with_realized_result(
+                    trade.pnl,
+                    stopped_out=bool(closed_reason and "stop" in closed_reason),
                 )
                 position = None
 
         mark = float(row["close"])
-        equity = cash + (position.remaining_quantity * mark if position else 0.0)
-        peak_equity = max(peak_equity, equity)
-        drawdown = 1 - equity / peak_equity if peak_equity > 0 else 1.0
-        equity_times.append(timestamp)
-        equity_values.append(equity * rate)
+        equity_quote = cash + (position.remaining_quantity * mark if position else 0.0)
+        equity_cny = equity_quote * rate
+        risk_state = risk_state.with_equity(equity_cny)
+        equity_times.append(close_time)
+        equity_values.append(equity_cny)
 
-        if position is None and pending is None and index < len(enriched) - 1:
-            daily_loss_fraction = (
-                day_realized_loss / day_start_equity if day_start_equity > 0 else 1.0
+        if position is None and pending is None and replay_index < len(replay_positions) - 1:
+            evaluation = evaluate_setup_at_time(
+                prepared,
+                config,
+                evaluated_at=close_time.to_pydatetime(),
+                risk_state=risk_state,
+                data_is_complete=True,
             )
-            locked = (
-                daily_stops >= config.risk.daily_stop_count
-                or daily_loss_fraction >= config.risk.daily_max_loss
-                or drawdown >= config.risk.max_drawdown
-            )
-            daily_trend = Trend(str(daily_trends.iloc[index]))
-            setup = None if locked else _entry_setup(enriched, index, daily_trend, config)
-            if setup:
-                pending = {"stop": setup["stop"], "regime": daily_trend}
+            if decision_observer:
+                decision_observer(close_time.to_pydatetime(), evaluation)
+            decision = evaluation.decision
+            if (
+                decision.label in {SignalLabel.BUY_CANDIDATE, SignalLabel.STRONG_BUY_CANDIDATE}
+                and decision.stop_loss is not None
+                and decision.take_profit_1 is not None
+                and decision.take_profit_2 is not None
+            ):
+                pending = _PendingEntry(
+                    stop=decision.stop_loss,
+                    target_1=decision.take_profit_1,
+                    target_2=decision.take_profit_2,
+                    regime=evaluation.trends["1d"],
+                )
 
     if position is not None:
-        timestamp, row = pd.Timestamp(enriched.index[-1]), enriched.iloc[-1]
+        timestamp = pd.Timestamp(four_hour.index[replay_positions[-1]])
+        row = four_hour.iloc[replay_positions[-1]]
         raw_exit = float(row["close"])
         exit_price = raw_exit * (1 - config.backtest.slippage_rate)
         proceeds = position.remaining_quantity * exit_price
@@ -383,31 +393,22 @@ def run_backtest(frame: pd.DataFrame, symbol: str, config: AppConfig) -> Backtes
         position.slippage += slip
         total_fees += fee
         total_slippage += slip
-        pnl_quote = position.exit_proceeds - position.entry_cost
         trades.append(
-            TradeRecord(
+            _record_closed_trade(
+                position=position,
                 symbol=symbol,
-                entry_time=position.entry_time.to_pydatetime(),
-                exit_time=timestamp.to_pydatetime(),
-                entry_price=position.entry_price,
-                exit_price=(position.exit_proceeds + position.fees) / position.original_quantity,
-                quantity=position.original_quantity,
-                pnl=pnl_quote * rate,
-                return_pct=pnl_quote / position.entry_cost,
-                fees=position.fees * rate,
-                slippage_cost=position.slippage * rate,
-                holding_hours=(timestamp - position.entry_time).total_seconds() / 3600,
+                timestamp=timestamp,
                 exit_reason="end_of_test",
-                market_regime=position.regime,
+                rate=rate,
             )
         )
         equity_values[-1] = cash * rate
 
     equity_series = pd.Series(equity_values, index=pd.DatetimeIndex(equity_times), dtype=float)
     initial_cny = config.risk.account_equity_cny
-    buy_hold = float(
-        enriched["close"].iloc[-1] / enriched["close"].iloc[config.backtest.warmup_bars] - 1
-    )
+    first_bar = four_hour.iloc[replay_positions[0]]
+    last_bar = four_hour.iloc[replay_positions[-1]]
+    buy_hold = float(last_bar["close"] / first_bar["open"] - 1)
     metrics = _metrics(
         equity_series,
         trades,
@@ -416,12 +417,8 @@ def run_backtest(frame: pd.DataFrame, symbol: str, config: AppConfig) -> Backtes
         total_slippage * rate,
         buy_hold,
     )
-    yearly = (
-        equity_series.resample("YE")
-        .last()
-        .pct_change()
-        .fillna(equity_series.resample("YE").last().iloc[0] / initial_cny - 1)
-    )
+    yearly_values = equity_series.resample("YE").last()
+    yearly = yearly_values.pct_change().fillna(yearly_values.iloc[0] / initial_cny - 1)
     phase_results = {
         trend.value: _finite(
             sum(trade.pnl for trade in trades if trade.market_regime == trend) / initial_cny
@@ -442,16 +439,18 @@ def run_backtest(frame: pd.DataFrame, symbol: str, config: AppConfig) -> Backtes
             "risk_per_trade": config.risk.risk_per_trade,
             "random_seed": config.strategy.random_seed,
             "parameter_optimization": False,
+            "strategy_evaluator": "evaluate_setup_at_time",
+            "timeframes": ["1d", "4h", "1h"],
         },
         metrics=metrics,
-        walk_forward_splits=_split_results(equity_series, config),
+        time_splits=_time_split_results(equity_series, config),
         yearly_results={str(index.year): _finite(value) for index, value in yearly.items()},
         market_phase_results=phase_results,
         trades=trades,
         warnings=[
             "固定 BTC/ETH 样本不能代表全市场，仍存在样本选择限制。",
-            "日线仅使用完整自然日，并在次日才可用于 4 小时决策。",
+            "每次评估只纳入该时刻已经收盘的日线、4 小时线和 1 小时线。",
             "同一根 K 线同时触发止损和目标时按止损优先；入场 K 线不执行止盈。",
-            "没有自动参数优化；时间切分只用于报告。",
+            "60%/20%/20% 仅为固定时间切分，不是 walk-forward，且没有自动参数优化。",
         ],
     )

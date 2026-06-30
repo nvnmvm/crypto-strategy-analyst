@@ -20,7 +20,8 @@ def _zone_lines(zones: list[PriceZone]) -> str:
         return "- 暂无可信区域"
     return "\n".join(
         f"- {zone.lower_price:,.4f}–{zone.upper_price:,.4f}（中心 {zone.center_price:,.4f}，"
-        f"强度 {zone.strength_score:.1f}，触碰 {zone.touch_count} 次，周期 {zone.timeframe}）"
+        f"强度 {zone.strength_score:.1f}，独立触碰 {zone.touch_count} 次，"
+        f"反弹 {zone.reaction_count} 次，跌破/突破 {zone.break_count} 次，周期 {zone.timeframe}）"
         for zone in zones
     )
 

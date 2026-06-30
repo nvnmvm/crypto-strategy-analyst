@@ -49,6 +49,8 @@ class PriceZone(BaseModel):
     level_type: Literal["support", "resistance"]
     timeframe: str
     touch_count: int = Field(ge=1)
+    reaction_count: int = Field(default=0, ge=0)
+    break_count: int = Field(default=0, ge=0)
     last_touch_time: datetime
     strength_score: float = Field(ge=0, le=100)
     evidence: list[str]
@@ -191,7 +193,7 @@ class BacktestResult(BaseModel):
     final_equity_cny: float
     config: dict[str, Any]
     metrics: BacktestMetrics
-    walk_forward_splits: dict[str, dict[str, Any]]
+    time_splits: dict[str, dict[str, Any]]
     yearly_results: dict[str, float]
     market_phase_results: dict[str, float]
     trades: list[TradeRecord]

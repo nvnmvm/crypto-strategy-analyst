@@ -197,6 +197,18 @@
           "title": "Touch Count",
           "type": "integer"
         },
+        "reaction_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Reaction Count",
+          "type": "integer"
+        },
+        "break_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Break Count",
+          "type": "integer"
+        },
         "last_touch_time": {
           "format": "date-time",
           "title": "Last Touch Time",

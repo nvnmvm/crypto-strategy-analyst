@@ -54,6 +54,11 @@ class StrategyConfig(BaseModel):
     support_proximity_atr: float = Field(default=1.0, gt=0, le=3)
     volume_ratio_threshold: float = Field(default=1.2, ge=1)
     min_confirmations: int = Field(default=2, ge=2, le=7)
+    touch_cooldown_bars: int = Field(default=6, ge=1, le=50)
+    reaction_atr_multiple: float = Field(default=0.75, gt=0, le=5)
+    break_atr_multiple: float = Field(default=0.25, gt=0, le=2)
+    target_resistance_buffer_atr: float = Field(default=0.15, ge=0, le=1)
+    min_second_target_r_multiple: float = Field(default=2.5, ge=2.1, le=4)
     enable_adx: bool = True
     random_seed: int = 42
 
@@ -64,7 +69,6 @@ class BacktestConfig(BaseModel):
     interval: Literal["4h"] = "4h"
     fee_rate: float = Field(default=0.001, ge=0, le=0.02)
     slippage_rate: float = Field(default=0.0005, ge=0, le=0.02)
-    warmup_bars: int = Field(default=220, ge=210)
     train_ratio: float = Field(default=0.6, gt=0)
     validation_ratio: float = Field(default=0.2, gt=0)
     test_ratio: float = Field(default=0.2, gt=0)
@@ -73,7 +77,7 @@ class BacktestConfig(BaseModel):
     def validate_split(self) -> BacktestConfig:
         total = self.train_ratio + self.validation_ratio + self.test_ratio
         if abs(total - 1.0) > 1e-9:
-            raise ValueError("walk-forward ratios must sum to 1")
+            raise ValueError("time split ratios must sum to 1")
         return self
 
 
@@ -82,6 +86,7 @@ class OutputConfig(BaseModel):
 
     output_dir: str = "outputs"
     log_dir: str = "logs"
+    risk_state_file: str = "state/risk-state.json"
 
 
 class AppConfig(BaseModel):
