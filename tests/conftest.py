@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from crypto_strategy_analyst.indicators import add_indicators
+from crypto_strategy_analyst.models import SymbolTradingRules
 
 
 def make_ohlcv(
@@ -47,3 +50,17 @@ def market_frames() -> dict[str, pd.DataFrame]:
         "4h": make_ohlcv(periods=1_440, freq="4h", seed=2),
         "1h": make_ohlcv(periods=5_760, freq="1h", seed=3),
     }
+
+
+@pytest.fixture
+def trading_rules() -> SymbolTradingRules:
+    return SymbolTradingRules(
+        symbol="BTC/USDT",
+        price_tick_size=0.01,
+        quantity_step_size=0.00001,
+        minimum_quantity=0.00001,
+        maximum_quantity=1000,
+        minimum_notional=5,
+        fetched_at=datetime(2026, 7, 1, tzinfo=UTC),
+        data_source="test fixture",
+    )

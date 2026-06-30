@@ -26,6 +26,6 @@ def test_git_install_root_contains_skill_file():
 def test_release_version_metadata_is_synchronized():
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert version == "0.1.1"
+    assert version == "0.1.2"
     assert project["project"]["version"] == version
     assert f"@v{version}" in (ROOT / "README.md").read_text(encoding="utf-8")

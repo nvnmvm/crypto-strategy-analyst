@@ -2,24 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 
 import numpy as np
 import pandas as pd
 
 from .config import AppConfig
-from .models import BacktestMetrics, BacktestResult, SignalLabel, TradeRecord, Trend
-from .risk import RiskState
+from .errors import PositionConstraintError
+from .execution import validate_pending_entry_at_open
+from .models import (
+    BacktestMetrics,
+    BacktestResult,
+    CostScenarioMetrics,
+    SignalLabel,
+    SymbolTradingRules,
+    TradeRecord,
+    Trend,
+)
+from .risk import RiskState, calculate_position
+from .signal import SignalDecision
 from .strategy import SetupEvaluation, evaluate_setup_at_time, prepare_market_frames
 
 
 @dataclass(slots=True)
 class _PendingEntry:
-    stop: float
-    target_1: float
-    target_2: float
+    signal: SignalDecision
+    atr: float
+    created_index: int
     regime: Trend
 
 
@@ -40,6 +55,7 @@ class _Position:
     fees: float
     slippage: float
     regime: Trend
+    initial_risk_cny: float
 
 
 def _utc_timestamp(value: str | datetime | None) -> pd.Timestamp | None:
@@ -90,6 +106,11 @@ def _metrics(
     fees: float,
     slippage: float,
     buy_hold: float,
+    exposure_percent: float,
+    average_capital_utilization: float,
+    generated_signal_count: int,
+    cancelled_signal_count: int,
+    no_trade_count: int,
 ) -> BacktestMetrics:
     final = float(equity.iloc[-1])
     total_return = final / initial - 1
@@ -111,6 +132,7 @@ def _metrics(
     payoff = (sum(wins) / len(wins)) / (sum(losses) / len(losses)) if wins and losses else 0.0
     profit_factor = sum(wins) / sum(losses) if losses else (999.0 if wins else 0.0)
     outcomes = [trade.pnl > 0 for trade in trades]
+    realized_r = [trade.realized_r_multiple for trade in trades]
     return BacktestMetrics(
         total_return=_finite(total_return),
         annualized_return=_finite(annualized),
@@ -129,6 +151,18 @@ def _metrics(
         total_fees=_finite(fees),
         slippage_cost=_finite(slippage),
         buy_and_hold_return=_finite(buy_hold),
+        expectancy=_finite(float(np.mean([trade.pnl for trade in trades])) if trades else 0.0),
+        exposure_percent=_finite(exposure_percent),
+        average_capital_utilization=_finite(average_capital_utilization),
+        generated_signal_count=generated_signal_count,
+        executed_trade_count=len(trades),
+        cancelled_signal_count=cancelled_signal_count,
+        no_trade_count=no_trade_count,
+        average_initial_risk_cny=_finite(
+            float(np.mean([trade.initial_risk_cny for trade in trades])) if trades else 0.0
+        ),
+        average_realized_r_multiple=_finite(float(np.mean(realized_r)) if realized_r else 0.0),
+        median_realized_r_multiple=_finite(float(np.median(realized_r)) if realized_r else 0.0),
     )
 
 
@@ -182,7 +216,40 @@ def _record_closed_trade(
         holding_hours=(timestamp - position.entry_time).total_seconds() / 3600,
         exit_reason=exit_reason,
         market_regime=position.regime,
+        initial_risk_cny=position.initial_risk_cny,
+        realized_r_multiple=(
+            pnl_quote * rate / position.initial_risk_cny if position.initial_risk_cny > 0 else 0.0
+        ),
     )
+
+
+def _frames_hash(frames: Mapping[str, pd.DataFrame]) -> str:
+    digest = hashlib.sha256()
+    for timeframe in ("1d", "4h", "1h"):
+        digest.update(timeframe.encode())
+        digest.update(
+            frames[timeframe].to_csv(index=True, float_format="%.12g").encode("utf-8")
+        )
+    return digest.hexdigest()
+
+
+def _strategy_config_hash(config: AppConfig) -> str:
+    payload = {
+        "config_version": config.config_version,
+        "market": config.market.model_dump(mode="json"),
+        "risk": config.risk.model_dump(mode="json"),
+        "strategy": config.strategy.model_dump(mode="json"),
+        "backtest": config.backtest.model_dump(mode="json"),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _package_version() -> str:
+    try:
+        return version("crypto-strategy-analyst")
+    except PackageNotFoundError:  # pragma: no cover
+        return "0.1.2"
 
 
 def run_backtest(
@@ -193,6 +260,9 @@ def run_backtest(
     start: str | datetime | None = None,
     end: str | datetime | None = None,
     decision_observer: Callable[[datetime, SetupEvaluation], None] | None = None,
+    trading_rules: SymbolTradingRules | None = None,
+    dataset_hash: str | None = None,
+    include_cost_sensitivity: bool = False,
 ) -> BacktestResult:
     """Replay closed 1d/4h/1h inputs and execute each decision next 4h open.
 
@@ -226,6 +296,10 @@ def run_backtest(
     equity_values: list[float] = []
     equity_times: list[pd.Timestamp] = []
     total_fees = total_slippage = 0.0
+    generated_signal_count = executed_entry_count = cancelled_entry_count = no_trade_count = 0
+    cancelled_reasons: Counter[str] = Counter()
+    exposure_flags: list[float] = []
+    capital_utilization: list[float] = []
     risk_state = RiskState(
         date=start_time.date(),
         daily_start_equity_cny=config.risk.account_equity_cny,
@@ -242,40 +316,61 @@ def run_backtest(
         if pending is not None and position is None:
             raw_open = float(row["open"])
             entry_price = raw_open * (1 + config.backtest.slippage_rate)
-            valid_targets = pending.stop < entry_price < pending.target_1 < pending.target_2
-            if valid_targets:
-                equity_before = cash
-                risk_quote = equity_before * config.risk.risk_per_trade
-                quantity_by_risk = risk_quote / (entry_price - pending.stop)
-                quantity_by_cash = cash / (entry_price * (1 + config.backtest.fee_rate))
-                quantity = min(
-                    quantity_by_risk,
-                    quantity_by_cash * config.risk.max_position_fraction,
-                )
-                if quantity > 0:
-                    notional = quantity * entry_price
-                    fee = notional * config.backtest.fee_rate
-                    slip = quantity * (entry_price - raw_open)
-                    cash -= notional + fee
-                    total_fees += fee
-                    total_slippage += slip
-                    position = _Position(
-                        entry_time=timestamp,
-                        entry_index=index,
+            validation = validate_pending_entry_at_open(
+                pending.signal,
+                entry_price,
+                pending.atr,
+                config,
+                age_bars=index - pending.created_index,
+            )
+            if validation.is_valid:
+                suggestion = None
+                try:
+                    suggestion = calculate_position(
                         entry_price=entry_price,
-                        original_quantity=quantity,
-                        remaining_quantity=quantity,
-                        stop_price=pending.stop,
-                        target_1=pending.target_1,
-                        target_2=pending.target_2,
-                        target_1_done=False,
-                        target_2_done=False,
-                        entry_cost=notional + fee,
-                        exit_proceeds=0.0,
-                        fees=fee,
-                        slippage=slip,
-                        regime=pending.regime,
+                        stop_price=float(pending.signal.stop_loss),
+                        config=config.risk,
+                        account_equity_cny=cash * rate,
+                        trading_rules=trading_rules,
                     )
+                except (PositionConstraintError, ValueError) as exc:
+                    cancelled_reasons[str(exc)] += 1
+                    cancelled_entry_count += 1
+                if suggestion is not None:
+                    quantity = suggestion.quantity
+                    normalized_entry = suggestion.entry_price
+                    notional = quantity * normalized_entry
+                    fee = notional * config.backtest.fee_rate
+                    slip = quantity * (normalized_entry - raw_open)
+                    if notional + fee > cash:
+                        cancelled_reasons["insufficient_cash_after_fees"] += 1
+                        cancelled_entry_count += 1
+                    else:
+                        cash -= notional + fee
+                        total_fees += fee
+                        total_slippage += slip
+                        position = _Position(
+                            entry_time=timestamp,
+                            entry_index=index,
+                            entry_price=normalized_entry,
+                            original_quantity=quantity,
+                            remaining_quantity=quantity,
+                            stop_price=suggestion.stop_price,
+                            target_1=float(pending.signal.take_profit_1),
+                            target_2=float(pending.signal.take_profit_2),
+                            target_1_done=False,
+                            target_2_done=False,
+                            entry_cost=notional + fee,
+                            exit_proceeds=0.0,
+                            fees=fee,
+                            slippage=slip,
+                            regime=pending.regime,
+                            initial_risk_cny=suggestion.risk_amount_cny,
+                        )
+                        executed_entry_count += 1
+            else:
+                cancelled_entry_count += 1
+                cancelled_reasons.update(validation.reasons)
             pending = None
 
         closed_reason: str | None = None
@@ -361,6 +456,12 @@ def run_backtest(
         risk_state = risk_state.with_equity(equity_cny)
         equity_times.append(close_time)
         equity_values.append(equity_cny)
+        exposure_flags.append(1.0 if position else 0.0)
+        capital_utilization.append(
+            (position.remaining_quantity * mark / equity_quote)
+            if position is not None and equity_quote > 0
+            else 0.0
+        )
 
         if position is None and pending is None and replay_index < len(replay_positions) - 1:
             evaluation = evaluate_setup_at_time(
@@ -379,12 +480,15 @@ def run_backtest(
                 and decision.take_profit_1 is not None
                 and decision.take_profit_2 is not None
             ):
+                generated_signal_count += 1
                 pending = _PendingEntry(
-                    stop=decision.stop_loss,
-                    target_1=decision.take_profit_1,
-                    target_2=decision.take_profit_2,
+                    signal=decision,
+                    atr=float(evaluation.frames["4h"]["atr14"].iloc[-1]),
+                    created_index=index,
                     regime=evaluation.trends["1d"],
                 )
+            else:
+                no_trade_count += 1
 
     if position is not None:
         timestamp = pd.Timestamp(four_hour.index[replay_positions[-1]])
@@ -423,6 +527,11 @@ def run_backtest(
         total_fees * rate,
         total_slippage * rate,
         buy_hold,
+        float(np.mean(exposure_flags) * 100 if exposure_flags else 0.0),
+        float(np.mean(capital_utilization) if capital_utilization else 0.0),
+        generated_signal_count,
+        cancelled_entry_count,
+        no_trade_count,
     )
     yearly_values = equity_series.resample("YE").last()
     yearly = yearly_values.pct_change().fillna(yearly_values.iloc[0] / initial_cny - 1)
@@ -432,8 +541,18 @@ def run_backtest(
         )
         for trend in Trend
     }
-    return BacktestResult(
+    insufficient_warning = (
+        f"交易样本仅 {len(trades)} 笔，少于 {config.backtest.minimum_sample_trades} 笔；"
+        "胜率、Sharpe、Sortino 等统计不宜用于证明策略有效。"
+        if len(trades) < config.backtest.minimum_sample_trades
+        else None
+    )
+    result = BacktestResult(
         generated_at=datetime.now(UTC),
+        package_version=_package_version(),
+        strategy_config_hash=_strategy_config_hash(config),
+        dataset_hash=dataset_hash or _frames_hash(frames),
+        random_seed=config.strategy.random_seed,
         symbol=symbol,
         interval=config.backtest.interval,
         start_time=equity_series.index[0].to_pydatetime(),
@@ -453,11 +572,54 @@ def run_backtest(
         time_splits=_time_split_results(equity_series, config),
         yearly_results={str(index.year): _finite(value) for index, value in yearly.items()},
         market_phase_results=phase_results,
+        generated_signal_count=generated_signal_count,
+        executed_entry_count=executed_entry_count,
+        cancelled_entry_count=cancelled_entry_count,
+        cancelled_entry_reasons=dict(sorted(cancelled_reasons.items())),
+        cost_sensitivity={},
+        insufficient_sample_warning=insufficient_warning,
         trades=trades,
         warnings=[
             "固定 BTC/ETH 样本不能代表全市场，仍存在样本选择限制。",
             "每次评估只纳入该时刻已经收盘的日线、4 小时线和 1 小时线。",
             "同一根 K 线同时触发止损和目标时按止损优先；入场 K 线不执行止盈。",
             "60%/20%/20% 仅为固定时间切分，不是 walk-forward，且没有自动参数优化。",
+            *([insufficient_warning] if insufficient_warning else []),
         ],
     )
+    if not include_cost_sensitivity:
+        return result
+    scenarios = {
+        "base": (1.0, 1.0),
+        "fee_x2": (2.0, 1.0),
+        "slippage_x2": (1.0, 2.0),
+        "fee_and_slippage_x2": (2.0, 2.0),
+    }
+    sensitivity: dict[str, CostScenarioMetrics] = {}
+    for name, (fee_multiplier, slippage_multiplier) in scenarios.items():
+        scenario_result = result
+        if name != "base":
+            scenario_backtest = config.backtest.model_copy(
+                update={
+                    "fee_rate": config.backtest.fee_rate * fee_multiplier,
+                    "slippage_rate": config.backtest.slippage_rate * slippage_multiplier,
+                }
+            )
+            scenario_config = config.model_copy(update={"backtest": scenario_backtest})
+            scenario_result = run_backtest(
+                frames,
+                symbol,
+                scenario_config,
+                start=start,
+                end=end,
+                trading_rules=trading_rules,
+                dataset_hash=result.dataset_hash,
+                include_cost_sensitivity=False,
+            )
+        sensitivity[name] = CostScenarioMetrics(
+            total_return=scenario_result.metrics.total_return,
+            max_drawdown=scenario_result.metrics.max_drawdown,
+            profit_factor=scenario_result.metrics.profit_factor,
+            trade_count=scenario_result.metrics.trade_count,
+        )
+    return result.model_copy(update={"cost_sensitivity": sensitivity})

@@ -21,6 +21,9 @@ class MarketConfig(BaseModel):
     history_limit: int = Field(default=500, ge=250, le=1000)
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     max_retries: int = Field(default=3, ge=1, le=5)
+    freshness_retry_count: int = Field(default=3, ge=0, le=10)
+    freshness_retry_delay_seconds: float = Field(default=20.0, ge=0, le=120)
+    freshness_grace_seconds: float = Field(default=90.0, ge=0, le=600)
 
 
 class RiskConfig(BaseModel):
@@ -59,6 +62,8 @@ class StrategyConfig(BaseModel):
     break_atr_multiple: float = Field(default=0.25, gt=0, le=2)
     target_resistance_buffer_atr: float = Field(default=0.15, ge=0, le=1)
     min_second_target_r_multiple: float = Field(default=2.5, ge=2.1, le=4)
+    max_entry_gap_atr: float = Field(default=0.5, gt=0, le=3)
+    pending_signal_valid_bars: int = Field(default=1, ge=1, le=6)
     enable_adx: bool = True
     random_seed: int = 42
 
@@ -72,6 +77,7 @@ class BacktestConfig(BaseModel):
     train_ratio: float = Field(default=0.6, gt=0)
     validation_ratio: float = Field(default=0.2, gt=0)
     test_ratio: float = Field(default=0.2, gt=0)
+    minimum_sample_trades: int = Field(default=30, ge=1)
 
     @model_validator(mode="after")
     def validate_split(self) -> BacktestConfig:
@@ -87,11 +93,13 @@ class OutputConfig(BaseModel):
     output_dir: str = "outputs"
     log_dir: str = "logs"
     risk_state_file: str = "state/risk-state.json"
+    risk_events_file: str = "state/risk-events.jsonl"
 
 
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    config_version: Literal[1] = 1
     market: MarketConfig = MarketConfig()
     risk: RiskConfig = RiskConfig()
     strategy: StrategyConfig = StrategyConfig()

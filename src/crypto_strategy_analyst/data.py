@@ -12,7 +12,7 @@ import pandas as pd
 
 from .config import MarketConfig
 from .errors import MarketDataError
-from .models import DataQuality, QualityGrade
+from .models import DataQuality, QualityGrade, SymbolTradingRules
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def normalize_symbol(symbol: str) -> str:
 
     cleaned = symbol.strip().upper().replace("-", "/")
     if cleaned not in {"BTC/USDT", "ETH/USDT"}:
-        raise MarketDataError("v0.1.1 supports only BTC/USDT and ETH/USDT")
+        raise MarketDataError("v0.1.2 supports only BTC/USDT and ETH/USDT")
     return cleaned.replace("/", "")
 
 
@@ -58,28 +58,26 @@ class BinancePublicClient:
         self.config = config
         self._client = client
 
-    def _request(self, params: dict[str, Any]) -> list[list[Any]]:
+    def _request_json(self, path: str, params: dict[str, Any]) -> Any:
         errors: list[str] = []
         for base_url in BINANCE_BASE_URLS:
             for attempt in range(1, self.config.max_retries + 1):
                 try:
                     if self._client is None:
                         response = httpx.get(
-                            f"{base_url}/api/v3/klines",
+                            f"{base_url}{path}",
                             params=params,
                             timeout=self.config.request_timeout_seconds,
                             follow_redirects=False,
                         )
                     else:
                         response = self._client.get(
-                            f"{base_url}/api/v3/klines",
+                            f"{base_url}{path}",
                             params=params,
                             timeout=self.config.request_timeout_seconds,
                         )
                     response.raise_for_status()
                     payload = response.json()
-                    if not isinstance(payload, list):
-                        raise MarketDataError("Binance returned a non-list payload")
                     LOGGER.info(
                         "public klines fetched",
                         extra={"event_data": {"base_url": base_url, "bars": len(payload)}},
@@ -92,6 +90,46 @@ class BinancePublicClient:
         raise MarketDataError(
             "public Binance request failed after bounded retries: " + "; ".join(errors)
         )
+
+    def _request(self, params: dict[str, Any]) -> list[list[Any]]:
+        payload = self._request_json("/api/v3/klines", params)
+        if not isinstance(payload, list):
+            raise MarketDataError("Binance returned a non-list kline payload")
+        return payload
+
+    def fetch_symbol_trading_rules(self, symbol: str) -> SymbolTradingRules:
+        """Fetch public Binance spot precision and minimum-notional filters."""
+
+        compact_symbol = normalize_symbol(symbol)
+        payload = self._request_json("/api/v3/exchangeInfo", {"symbol": compact_symbol})
+        try:
+            symbols = payload["symbols"]
+            item = next(value for value in symbols if value["symbol"] == compact_symbol)
+            filters = {value["filterType"]: value for value in item["filters"]}
+            price_filter = filters["PRICE_FILTER"]
+            lot_filter = filters["LOT_SIZE"]
+            market_lot = filters.get("MARKET_LOT_SIZE", {})
+            market_step = float(market_lot.get("stepSize", 0))
+            quantity_filter = market_lot if market_step > 0 else lot_filter
+            notional_filter = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL")
+            if notional_filter is None:
+                raise KeyError("MIN_NOTIONAL/NOTIONAL")
+            return SymbolTradingRules(
+                symbol=symbol.upper().replace("-", "/"),
+                price_tick_size=float(price_filter["tickSize"]),
+                quantity_step_size=float(quantity_filter["stepSize"]),
+                minimum_quantity=float(quantity_filter["minQty"]),
+                maximum_quantity=(
+                    float(quantity_filter["maxQty"])
+                    if float(quantity_filter.get("maxQty", 0)) > 0
+                    else None
+                ),
+                minimum_notional=float(notional_filter["minNotional"]),
+                fetched_at=datetime.now(UTC),
+                data_source="Binance public spot REST /api/v3/exchangeInfo",
+            )
+        except (KeyError, StopIteration, TypeError, ValueError) as exc:
+            raise MarketDataError("Binance exchangeInfo is missing required spot filters") from exc
 
     def fetch_klines(
         self,

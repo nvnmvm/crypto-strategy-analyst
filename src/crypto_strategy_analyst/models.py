@@ -28,6 +28,36 @@ class QualityGrade(StrEnum):
     INVALID = "invalid"
 
 
+class FreshnessStatus(StrEnum):
+    FRESH = "fresh"
+    STALE = "stale"
+    MISSING = "missing"
+    INVALID = "invalid"
+
+
+class DataFreshnessItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: FreshnessStatus
+    expected_latest_close: datetime
+    actual_latest_close: datetime | None
+    staleness_seconds: float = Field(ge=0)
+    reason: str | None = None
+
+
+class SymbolTradingRules(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    price_tick_size: float = Field(gt=0)
+    quantity_step_size: float = Field(gt=0)
+    minimum_quantity: float = Field(ge=0)
+    maximum_quantity: float | None = Field(default=None, gt=0)
+    minimum_notional: float = Field(ge=0)
+    fetched_at: datetime
+    data_source: str
+
+
 class DataQuality(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -105,18 +135,24 @@ class PositionSuggestion(BaseModel):
     risk_amount_cny: float = Field(ge=0)
     position_fraction: float = Field(ge=0, le=1)
     quote_to_account_rate: float = Field(gt=0)
+    entry_price: float = Field(gt=0)
+    stop_price: float = Field(gt=0)
+    minimum_notional: float = Field(ge=0)
+    quantity_step_size: float = Field(gt=0)
 
 
 class AnalysisReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "1.1.0"
+    schema_version: str = "1.2.0"
     generated_at: datetime
     requested_at: datetime
     evaluation_time: datetime
     evaluation_timeframe: Literal["4h"] = "4h"
     time_alignment_applied: bool
     latest_completed_candle_close: dict[str, datetime]
+    data_freshness: dict[str, DataFreshnessItem]
+    freshness_retry_attempts: int = Field(ge=0)
     symbol: str
     market: Literal["binance_spot"] = "binance_spot"
     data_source: str
@@ -124,6 +160,8 @@ class AnalysisReport(BaseModel):
     current_price: float = Field(gt=0)
     account_equity_cny: float = Field(ge=0)
     risk_locks: list[str]
+    trading_rules: SymbolTradingRules | Literal["not_available"]
+    trading_rules_status: Literal["available", "trading_rules_not_available"]
     data_quality: dict[str, DataQuality]
     daily_trend: Trend
     four_hour_trend: Trend
@@ -166,6 +204,8 @@ class TradeRecord(BaseModel):
     holding_hours: float
     exit_reason: str
     market_regime: Trend
+    initial_risk_cny: float = Field(ge=0)
+    realized_r_multiple: float
 
 
 class BacktestMetrics(BaseModel):
@@ -186,13 +226,36 @@ class BacktestMetrics(BaseModel):
     total_fees: float
     slippage_cost: float
     buy_and_hold_return: float
+    expectancy: float
+    exposure_percent: float = Field(ge=0, le=100)
+    average_capital_utilization: float = Field(ge=0, le=1)
+    generated_signal_count: int = Field(ge=0)
+    executed_trade_count: int = Field(ge=0)
+    cancelled_signal_count: int = Field(ge=0)
+    no_trade_count: int = Field(ge=0)
+    average_initial_risk_cny: float = Field(ge=0)
+    average_realized_r_multiple: float
+    median_realized_r_multiple: float
+
+
+class CostScenarioMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total_return: float
+    max_drawdown: float
+    profit_factor: float
+    trade_count: int = Field(ge=0)
 
 
 class BacktestResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "1.0.0"
+    schema_version: str = "1.1.0"
     generated_at: datetime
+    package_version: str
+    strategy_config_hash: str
+    dataset_hash: str
+    random_seed: int
     symbol: str
     interval: str
     start_time: datetime
@@ -204,6 +267,12 @@ class BacktestResult(BaseModel):
     time_splits: dict[str, dict[str, Any]]
     yearly_results: dict[str, float]
     market_phase_results: dict[str, float]
+    generated_signal_count: int = Field(ge=0)
+    executed_entry_count: int = Field(ge=0)
+    cancelled_entry_count: int = Field(ge=0)
+    cancelled_entry_reasons: dict[str, int]
+    cost_sensitivity: dict[str, CostScenarioMetrics]
+    insufficient_sample_warning: str | None
     trades: list[TradeRecord]
     warnings: list[str]
     disclaimer: str = "历史回测不代表未来收益；结果仅用于策略研究。"

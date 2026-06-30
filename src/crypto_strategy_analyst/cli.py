@@ -15,6 +15,7 @@ from .analysis import analyze_symbol
 from .backtest import run_backtest
 from .config import AppConfig, load_config
 from .data import BinancePublicClient, drop_incomplete_last_bar, validate_market_data
+from .dataset import fetch_dataset, load_dataset
 from .errors import CryptoStrategyError
 from .indicators import add_indicators
 from .levels import detect_zones
@@ -65,8 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(compare)
 
     backtest = subparsers.add_parser("backtest", help="Run strict time-forward 4h backtest")
-    backtest.add_argument("--symbol", required=True)
-    backtest.add_argument("--start", default="2021-01-01")
+    backtest.add_argument("--symbol")
+    backtest.add_argument("--dataset-dir")
+    backtest.add_argument("--start")
     backtest.add_argument("--end")
     backtest.add_argument("--limit", type=int)
     backtest.add_argument("--output-dir")
@@ -80,6 +82,15 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--end")
     fetch.add_argument("--output", required=True)
     _add_common(fetch)
+
+    fetch_dataset_parser = subparsers.add_parser(
+        "fetch-dataset", help="Fetch a checksummed offline three-timeframe dataset"
+    )
+    fetch_dataset_parser.add_argument("--symbol", required=True)
+    fetch_dataset_parser.add_argument("--start", required=True)
+    fetch_dataset_parser.add_argument("--end", required=True)
+    fetch_dataset_parser.add_argument("--output-dir", required=True)
+    _add_common(fetch_dataset_parser)
 
     indicators = subparsers.add_parser("indicators", help="Calculate indicators from an OHLCV CSV")
     indicators.add_argument("--input", required=True)
@@ -99,6 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
     position = subparsers.add_parser("position", help="Calculate risk-sized spot position")
     position.add_argument("--entry", type=float, required=True)
     position.add_argument("--stop", type=float, required=True)
+    position.add_argument("--symbol", default="BTC/USDT")
+    position.add_argument("--risk-state", help="Persistent risk-state JSON path")
+    position.add_argument("--equity-cny", type=float, help="Explicit equity override")
     _add_common(position)
 
     risk = subparsers.add_parser("risk", help="Manage persistent account risk state")
@@ -117,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_risk_state(update_equity)
 
     record_trade = risk_commands.add_parser("record-trade", help="Record realized trade PnL")
+    record_trade.add_argument("--trade-id", required=True)
     record_trade.add_argument("--pnl-cny", type=float, required=True)
     record_trade.add_argument("--stopped-out", action="store_true")
     _add_risk_state(record_trade)
@@ -127,6 +142,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_risk_state(reset_daily)
 
+    history = risk_commands.add_parser("history", help="Show recent risk-state audit events")
+    history.add_argument("--limit", type=int, default=20)
+    _add_risk_state(history)
+
     latest = subparsers.add_parser("latest", help="Print the latest saved Markdown report path")
     latest.add_argument("--output-dir", default="outputs")
     latest.add_argument("--symbol")
@@ -135,6 +154,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _config(args: argparse.Namespace) -> AppConfig:
     return load_config(getattr(args, "config", None))
+
+
+def _risk_store(args: argparse.Namespace, config: AppConfig) -> RiskStateStore:
+    custom_state = getattr(args, "risk_state", None)
+    if custom_state:
+        state_path = Path(custom_state).expanduser().resolve()
+        audit_path = state_path.with_name("risk-events.jsonl")
+    else:
+        state_path = Path(config.output.risk_state_file)
+        audit_path = Path(config.output.risk_events_file)
+    return RiskStateStore(state_path, audit_path=audit_path)
 
 
 def execute(args: argparse.Namespace) -> int:
@@ -148,7 +178,7 @@ def execute(args: argparse.Namespace) -> int:
     current_date = datetime.now(UTC).date()
 
     if args.command == "risk":
-        store = RiskStateStore(args.risk_state or config.output.risk_state_file)
+        store = _risk_store(args, config)
         if args.risk_command == "initialize":
             state = store.initialize(
                 current_date=current_date,
@@ -168,6 +198,15 @@ def execute(args: argparse.Namespace) -> int:
             )
             _json_print(risk_status(config.risk, state))
             return 0
+        if args.risk_command == "history":
+            _json_print(
+                {
+                    "risk_state": str(store.path),
+                    "audit_log": str(store.audit_path),
+                    "events": store.history(limit=args.limit),
+                }
+            )
+            return 0
         if args.risk_command == "update-equity":
             state = store.update_equity(
                 current_date=current_date,
@@ -182,6 +221,7 @@ def execute(args: argparse.Namespace) -> int:
             state = store.record_trade(
                 current_date=current_date,
                 initial_equity_cny=config.risk.account_equity_cny,
+                trade_id=args.trade_id,
                 pnl_cny=args.pnl_cny,
                 stopped_out=args.stopped_out,
             )
@@ -200,10 +240,9 @@ def execute(args: argparse.Namespace) -> int:
             _json_print(payload)
             return 0
 
-    client = BinancePublicClient(config.market)
-
     if args.command == "analyze":
-        risk_store = RiskStateStore(args.risk_state or config.output.risk_state_file)
+        client = BinancePublicClient(config.market)
+        risk_store = _risk_store(args, config)
         risk_state, initialized = risk_store.load_or_initialize(
             current_date=current_date,
             initial_equity_cny=config.risk.account_equity_cny,
@@ -224,13 +263,20 @@ def execute(args: argparse.Namespace) -> int:
                 "evaluation_time": report.evaluation_time,
                 "account_equity_cny": report.account_equity_cny,
                 "risk_state_initialized": initialized,
+                "data_freshness": {
+                    timeframe: item.model_dump(mode="json")
+                    for timeframe, item in report.data_freshness.items()
+                },
+                "freshness_retry_attempts": report.freshness_retry_attempts,
+                "trading_rules_status": report.trading_rules_status,
                 "json_report": str(json_path),
                 "markdown_report": str(markdown_path),
             }
         )
         return 0
     if args.command == "compare":
-        risk_store = RiskStateStore(args.risk_state or config.output.risk_state_file)
+        client = BinancePublicClient(config.market)
+        risk_store = _risk_store(args, config)
         risk_state, initialized = risk_store.load_or_initialize(
             current_date=current_date,
             initial_equity_cny=config.risk.account_equity_cny,
@@ -265,37 +311,61 @@ def execute(args: argparse.Namespace) -> int:
         )
         return 0
     if args.command == "backtest":
-        frames: dict[str, pd.DataFrame] = {}
-        warmup_days = {"1d": 365, "4h": 60, "1h": 15}
-        for timeframe in ("1d", "4h", "1h"):
-            fetch_start = None
-            if args.start:
-                requested_start = pd.Timestamp(args.start)
+        if args.dataset_dir:
+            snapshot = load_dataset(args.dataset_dir)
+            if args.symbol and args.symbol.upper().replace("-", "/") != snapshot.symbol:
+                raise ValueError("--symbol does not match the offline dataset manifest")
+            frames = snapshot.frames
+            symbol = snapshot.symbol
+            trading_rules = snapshot.trading_rules
+            dataset_hash = snapshot.dataset_hash
+        else:
+            if not args.symbol:
+                raise ValueError("--symbol is required unless --dataset-dir is provided")
+            client = BinancePublicClient(config.market)
+            symbol = args.symbol
+            trading_rules = client.fetch_symbol_trading_rules(symbol)
+            dataset_hash = None
+            frames = {}
+            online_start = args.start or "2021-01-01"
+            warmup_days = {"1d": 365, "4h": 60, "1h": 15}
+            for timeframe in ("1d", "4h", "1h"):
+                requested_start = pd.Timestamp(online_start)
                 requested_start = (
                     requested_start.tz_localize("UTC")
                     if requested_start.tzinfo is None
                     else requested_start.tz_convert("UTC")
                 )
                 fetch_start = requested_start - pd.Timedelta(days=warmup_days[timeframe])
-            frame = client.fetch_klines(
-                args.symbol,
-                timeframe,
-                start=fetch_start.to_pydatetime() if fetch_start is not None else None,
-                end=args.end,
-                limit=args.limit,
-            )
-            frame = drop_incomplete_last_bar(frame, timeframe)
-            quality = validate_market_data(frame, timeframe, minimum_bars=210)
-            if quality.grade.value == "invalid" or quality.gap_count:
-                raise CryptoStrategyError(
-                    f"backtest {timeframe} data failed quality gate: {quality.model_dump()}"
+                frame = client.fetch_klines(
+                    symbol,
+                    timeframe,
+                    start=fetch_start.to_pydatetime(),
+                    end=args.end,
+                    limit=args.limit,
                 )
-            frames[timeframe] = frame
-        result = run_backtest(frames, args.symbol, config, start=args.start, end=args.end)
+                frame = drop_incomplete_last_bar(frame, timeframe)
+                quality = validate_market_data(frame, timeframe, minimum_bars=210)
+                if quality.grade.value == "invalid" or quality.gap_count:
+                    raise CryptoStrategyError(
+                        f"backtest {timeframe} data failed quality gate: {quality.model_dump()}"
+                    )
+                frames[timeframe] = frame
+        result = run_backtest(
+            frames,
+            symbol,
+            config,
+            start=args.start,
+            end=args.end,
+            trading_rules=trading_rules,
+            dataset_hash=dataset_hash,
+            include_cost_sensitivity=True,
+        )
         path = save_backtest(result, output_dir)
         _json_print({"result": str(path), "metrics": result.metrics.model_dump()})
         return 0
     if args.command == "fetch":
+        client = BinancePublicClient(config.market)
         frame = client.fetch_klines(
             args.symbol,
             args.interval,
@@ -312,12 +382,51 @@ def execute(args: argparse.Namespace) -> int:
         frame.to_csv(output, index_label="timestamp")
         _json_print({"output": str(output), "quality": quality.model_dump(mode="json")})
         return 0
-    if args.command == "position":
-        _json_print(
-            calculate_position(
-                entry_price=args.entry, stop_price=args.stop, config=config.risk
-            ).model_dump()
+    if args.command == "fetch-dataset":
+        client = BinancePublicClient(config.market)
+        manifest_path = fetch_dataset(
+            client,
+            symbol=args.symbol,
+            start=args.start,
+            end=args.end,
+            output_dir=args.output_dir,
         )
+        _json_print({"manifest": str(manifest_path)})
+        return 0
+    if args.command == "position":
+        warning = None
+        if args.equity_cny is not None:
+            equity_cny = args.equity_cny
+            equity_source = "explicit_override"
+            warning = "显式 --equity-cny 覆盖了持久化风险状态中的当前权益。"
+        else:
+            store = _risk_store(args, config)
+            state = store.load_existing(
+                current_date=current_date,
+                initial_equity_cny=config.risk.account_equity_cny,
+            )
+            equity_cny = state.current_equity_cny
+            equity_source = str(store.path)
+        rules = BinancePublicClient(config.market).fetch_symbol_trading_rules(args.symbol)
+        suggestion = calculate_position(
+            entry_price=args.entry,
+            stop_price=args.stop,
+            config=config.risk,
+            account_equity_cny=equity_cny,
+            trading_rules=rules,
+        )
+        payload = {
+            "equity_source": equity_source,
+            "account_equity_cny": equity_cny,
+            "risk_per_trade": config.risk.risk_per_trade,
+            "maximum_loss_cny": suggestion.risk_amount_cny,
+            "position_notional_cny": suggestion.position_notional_cny,
+            "quantity": suggestion.quantity,
+            "trading_rules": rules.model_dump(mode="json"),
+        }
+        if warning:
+            payload["warning"] = warning
+        _json_print(payload)
         return 0
 
     frame = _frame_from_csv(args.input)

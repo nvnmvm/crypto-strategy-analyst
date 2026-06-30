@@ -24,6 +24,7 @@ class SignalDecision:
     take_profit_1: float | None
     take_profit_2: float | None
     reward_risk: float | None
+    planned_entry_price: float | None
 
 
 def _label_for_score(score: float) -> SignalLabel:
@@ -199,4 +200,5 @@ def generate_signal(
         take_profit_1=target_1,
         take_profit_2=target_2,
         reward_risk=reward_risk,
+        planned_entry_price=current_price if entry_zone else None,
     )
