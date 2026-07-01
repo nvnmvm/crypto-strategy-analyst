@@ -1,86 +1,44 @@
-config_version: 1
-market:
-  exchange: binance
-  market_type: spot
-  symbols: [BTC/USDT, ETH/USDT]
-  timeframes: [1d, 4h, 1h]
-  history_limit: 500
-  request_connect_timeout_seconds: 5
-  request_read_timeout_seconds: 15
-  request_max_total_seconds: 45
-  max_retries: 3
-  retry_backoff_base_seconds: 0.5
-  circuit_failure_threshold: 3
-  circuit_cooldown_seconds: 60
-  freshness_retry_count: 3
-  freshness_retry_delay_seconds: 20
-  freshness_grace_seconds: 90
-risk:
-  account_currency: CNY
-  account_equity_cny: 1000.0
-  cny_per_usdt: 7.2
-  risk_per_trade: 0.01
-  max_risk_per_trade: 0.03
-  daily_stop_count: 2
-  daily_max_loss: 0.02
-  max_drawdown: 0.10
-  max_position_fraction: 1.0
-  aggregate_open_risk_limit: 0.02
-  max_symbol_deployed_fraction: 0.60
-  max_total_deployed_fraction: 1.0
-  reserved_cash_fraction: 0.0
-  min_reward_risk: 2.0
-  trailing_stop_method: atr
-  trailing_atr_multiple: 2.0
+config_version: 2
+profile: auto
 strategy:
-  strategy_variant: baseline_v0_1_2
-  strong_buy_score: 75
-  buy_score: 60
-  watch_score: 45
-  b_tier_min_reward_risk: 1.6
-  execution_reward_risk_cushion: 0.2
-  b_tier_risk_multiplier: 0.5
-  sideways_risk_multiplier: 0.5
-  bear_first_risk_multiplier: 0.25
-  bear_drawdown_threshold: 0.25
-  bear_max_deployed_fraction: 0.20
-  maximum_bear_entries: 2
-  short_term_max_holding_days: 14
-  medium_term_max_holding_days: 90
-  long_term_max_holding_days: 180
-  swing_left: 3
-  swing_right: 3
-  level_merge_percent: 0.006
-  support_proximity_atr: 1.0
-  entry_zone_depth_atr: 0.25
-  entry_zone_chase_atr: 0.15
-  stop_buffer_atr: 0.50
-  volume_ratio_threshold: 1.2
-  min_confirmations: 2
+  support_rebound: true
+  breakout_retest: true
+  trend_pullback: true
+  range_reversal: true
+  bear_reversal: false
+  bear_accumulation: false
+  minimum_confidence: 58
+  entry_confidence: 68
+  minimum_reward_risk: 2
   touch_cooldown_bars: 6
-  reaction_atr_multiple: 0.75
-  break_atr_multiple: 0.25
-  target_resistance_buffer_atr: 0.15
-  min_second_target_r_multiple: 2.5
-  max_entry_gap_atr: 0.5
-  pending_signal_valid_bars: 1
-  enable_adx: true
-  random_seed: 42
-backtest:
-  interval: 4h
-  fee_rate: 0.001
-  slippage_rate: 0.0005
-  split_mode: calendar
-  train_end_date: "2021-12-31"
-  validation_end_date: "2023-12-31"
-  train_ratio: 0.6
-  validation_ratio: 0.2
-  test_ratio: 0.2
-  minimum_sample_trades: 30
-output:
+  level_tolerance_atr: 0.35
+risk:
+  account_equity: 600
+  risk_per_trade: 0.01
+  maximum_position_fraction: 0.30
+  maximum_order_notional: 200
+  maximum_daily_loss: 0.03
+  maximum_drawdown: 0.15
+trading:
+  trading_enabled: false
+  futures_enabled: false
+  require_human_confirmation: true
+  testnet: true
+  symbol_whitelist: [BTCUSDT, ETHUSDT]
+  api_key_env: BINANCE_API_KEY
+  api_secret_env: BINANCE_API_SECRET
+  maximum_price_deviation: 0.01
+  confirmation_ttl_seconds: 120
+  request_timeout_seconds: 10
+  emergency_stop: false
+data:
+  exchange: binance
+  timeframes: [1w, 1d, 4h, 1h]
+  history_limit: 500
+  stale_after_seconds: 600
+storage:
+  state_dir: state
   output_dir: outputs
-  log_dir: logs
-  risk_state_file: state/risk-state.json
-  risk_events_file: state/risk-events.jsonl
-  account_state_file: state/account-state.json
-  account_events_file: state/account-events.jsonl
+  paper_account_file: state/paper-account.json
+  paper_trades_file: state/paper-trades.jsonl
+  journal_file: state/manual-journal.jsonl

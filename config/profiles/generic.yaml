@@ -1,0 +1,5 @@
+profile: generic
+strategy:
+  entry_confidence: 72
+risk:
+  maximum_position_fraction: 0.15
