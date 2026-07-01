@@ -15,6 +15,21 @@ class Trend(StrEnum):
     SIDEWAYS = "sideways"
 
 
+class MarketRegime(StrEnum):
+    BULL_TREND = "bull_trend"
+    BULL_PULLBACK = "bull_pullback"
+    SIDEWAYS_RANGE = "sideways_range"
+    BEAR_TREND = "bear_trend"
+    BEAR_CAPITULATION = "bear_capitulation"
+    BEAR_RECOVERY = "bear_recovery"
+
+
+class StrategyHorizon(StrEnum):
+    SHORT_TERM = "short_term"
+    MEDIUM_TERM = "medium_term"
+    LONG_TERM = "long_term"
+
+
 class SignalLabel(StrEnum):
     STRONG_BUY_CANDIDATE = "strong_buy_candidate"
     BUY_CANDIDATE = "buy_candidate"
@@ -144,7 +159,7 @@ class PositionSuggestion(BaseModel):
 class AnalysisReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "1.2.0"
+    schema_version: str = "1.3.0"
     generated_at: datetime
     requested_at: datetime
     evaluation_time: datetime
@@ -158,14 +173,26 @@ class AnalysisReport(BaseModel):
     data_source: str
     analysis_timeframes: list[str]
     current_price: float = Field(gt=0)
+    account_currency: Literal["CNY", "USDT"] = "CNY"
     account_equity_cny: float = Field(ge=0)
     risk_locks: list[str]
     trading_rules: SymbolTradingRules | Literal["not_available"]
-    trading_rules_status: Literal["available", "trading_rules_not_available"]
+    trading_rules_status: Literal[
+        "available", "exchange_rules_unavailable", "exchange_rules_stale_cache"
+    ]
     data_quality: dict[str, DataQuality]
     daily_trend: Trend
     four_hour_trend: Trend
     one_hour_trend: Trend
+    market_regime: MarketRegime
+    regime_evidence: list[str]
+    selected_strategy: str
+    strategy_horizon: StrategyHorizon
+    entry_setup: str
+    candidate_tier: Literal["A", "B", "none"]
+    risk_multiplier: float = Field(ge=0, le=1)
+    confirmation_score: float = Field(ge=0)
+    strong_confirmation_count: int = Field(ge=0)
     one_hour_confirmation: str
     support_zones: list[PriceZone]
     resistance_zones: list[PriceZone]
@@ -173,10 +200,14 @@ class AnalysisReport(BaseModel):
     signal: SignalLabel
     signal_score: float = Field(ge=0, le=100)
     score_breakdown: ScoreBreakdown
+    support_zone: PriceZone | Literal["not_available"] = "not_available"
+    allowed_entry_range: PriceZone | Literal["not_available"] = "not_available"
+    planned_entry_price: float | Literal["not_available"] = "not_available"
     entry_zone: PriceZone | Literal["not_available"]
     stop_loss: float | Literal["not_available"]
     take_profit_1: float | Literal["not_available"]
     take_profit_2: float | Literal["not_available"]
+    target_sources: list[str]
     trailing_stop_method: str
     risk_reward_ratio: float | Literal["not_available"]
     suggested_position_size: PositionSuggestion | Literal["not_available"]
@@ -204,6 +235,11 @@ class TradeRecord(BaseModel):
     holding_hours: float
     exit_reason: str
     market_regime: Trend
+    market_regime_detail: MarketRegime | None = None
+    strategy_id: str = "trend_pullback"
+    strategy_horizon: StrategyHorizon = StrategyHorizon.MEDIUM_TERM
+    entry_setup: str = "support_rebound"
+    candidate_tier: Literal["A", "B", "none"] = "none"
     initial_risk_cny: float = Field(ge=0)
     realized_r_multiple: float
 
@@ -236,6 +272,14 @@ class BacktestMetrics(BaseModel):
     average_initial_risk_cny: float = Field(ge=0)
     average_realized_r_multiple: float
     median_realized_r_multiple: float
+    annualized_volatility: float = Field(ge=0)
+    longest_drawdown_recovery_days: float = Field(ge=0)
+    best_trade_pnl: float
+    worst_trade_pnl: float
+    best_trade_profit_contribution: float
+    best_year_profit_contribution: float
+    return_without_best_trade: float
+    return_without_best_year: float
 
 
 class CostScenarioMetrics(BaseModel):
@@ -247,10 +291,33 @@ class CostScenarioMetrics(BaseModel):
     trade_count: int = Field(ge=0)
 
 
+class BenchmarkMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total_return: float
+    annualized_return: float
+    max_drawdown: float
+    annualized_volatility: float = Field(ge=0)
+    exposure_percent: float = Field(ge=0, le=100)
+    longest_drawdown_recovery_days: float = Field(ge=0)
+    total_fees: float = Field(ge=0)
+    transaction_count: int = Field(ge=0)
+
+
+class ResearchProtocol(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    strategy_version: str
+    parameter_set_id: str
+    parameter_search_performed: Literal[False] = False
+    number_of_parameter_sets_evaluated: int = Field(default=1, ge=1)
+    selection_rule: Literal["predefined"] = "predefined"
+
+
 class BacktestResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "1.1.0"
+    schema_version: str = "1.3.0"
     generated_at: datetime
     package_version: str
     strategy_config_hash: str
@@ -262,17 +329,32 @@ class BacktestResult(BaseModel):
     end_time: datetime
     initial_capital_cny: float
     final_equity_cny: float
+    account_currency: Literal["CNY", "USDT"] = "CNY"
     config: dict[str, Any]
+    research_protocol: ResearchProtocol
     metrics: BacktestMetrics
-    time_splits: dict[str, dict[str, Any]]
+    chronological_holdout_split: dict[str, dict[str, Any]]
+    rolling_window_results: list[dict[str, Any]]
     yearly_results: dict[str, float]
     market_phase_results: dict[str, float]
+    market_regime_results: dict[str, float]
+    strategy_results: dict[str, float]
+    benchmarks: dict[str, BenchmarkMetrics]
     generated_signal_count: int = Field(ge=0)
     executed_entry_count: int = Field(ge=0)
     cancelled_entry_count: int = Field(ge=0)
     cancelled_entry_reasons: dict[str, int]
+    signal_label_counts: dict[str, int]
+    decision_blocker_counts: dict[str, int]
+    decision_blocker_counts_by_regime: dict[str, dict[str, int]]
     cost_sensitivity: dict[str, CostScenarioMetrics]
     insufficient_sample_warning: str | None
     trades: list[TradeRecord]
     warnings: list[str]
     disclaimer: str = "历史回测不代表未来收益；结果仅用于策略研究。"
+
+    @property
+    def time_splits(self) -> dict[str, dict[str, Any]]:
+        """Deprecated attribute alias; serialized output uses the truthful name."""
+
+        return self.chronological_holdout_split

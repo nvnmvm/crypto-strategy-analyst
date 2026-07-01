@@ -4,7 +4,13 @@ risk:
   account_equity_cny: 2000.0
   cny_per_usdt: 7.2
   risk_per_trade: 0.015
+  aggregate_open_risk_limit: 0.02
+  max_symbol_deployed_fraction: 0.60
 strategy:
+  strategy_variant: relaxed_trend_plus_breakout
+  execution_reward_risk_cushion: 0.2
   volume_ratio_threshold: 1.3
+  entry_zone_depth_atr: 0.25
+  entry_zone_chase_atr: 0.15
 output:
   output_dir: my-strategy-outputs

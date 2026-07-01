@@ -33,7 +33,6 @@ def validate_pending_entry_at_open(
         signal.entry_zone,
         signal.stop_loss,
         signal.take_profit_1,
-        signal.take_profit_2,
         signal.planned_entry_price,
     )
     if any(value is None for value in required):
@@ -41,14 +40,14 @@ def validate_pending_entry_at_open(
     entry_zone = signal.entry_zone
     stop = float(signal.stop_loss)
     target_1 = float(signal.take_profit_1)
-    target_2 = float(signal.take_profit_2)
+    target_2 = float(signal.take_profit_2) if signal.take_profit_2 is not None else None
     planned_entry = float(signal.planned_entry_price)
     reasons: list[str] = []
     if next_open_price <= stop:
         reasons.append("open_below_stop")
     if next_open_price >= target_1:
         reasons.append("open_above_target_1")
-    if target_2 <= target_1:
+    if target_2 is not None and target_2 <= target_1:
         reasons.append("invalid_target_order")
     if next_open_price > entry_zone.upper_price:
         reasons.append("open_above_entry_tolerance")
@@ -63,7 +62,12 @@ def validate_pending_entry_at_open(
         reasons.append(gap_reason)
     risk = next_open_price - stop
     reward_risk = (target_1 - next_open_price) / risk if risk > 0 else None
-    if reward_risk is None or reward_risk < config.risk.min_reward_risk:
+    minimum_reward_risk = (
+        config.strategy.b_tier_min_reward_risk
+        if signal.candidate_tier == "B"
+        else config.risk.min_reward_risk
+    )
+    if reward_risk is None or reward_risk < minimum_reward_risk:
         reasons.append("reward_risk_invalid_after_gap")
     unique_reasons = list(dict.fromkeys(reasons))
     return PendingEntryValidation(

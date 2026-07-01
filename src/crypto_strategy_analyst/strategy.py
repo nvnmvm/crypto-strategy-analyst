@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 import pandas as pd
 
+from .adaptive_signal import generate_adaptive_signal
 from .config import AppConfig
-from .data import INTERVAL_SECONDS
+from .data import INTERVAL_SECONDS, validate_market_data
 from .errors import InsufficientDataError
 from .indicators import add_indicators, snapshot
 from .levels import detect_zones, merge_timeframe_zones
 from .models import IndicatorSnapshot, PriceZone, Trend
+from .regime import RegimeAssessment, classify_market_regime
 from .risk import RiskState
 from .signal import SignalDecision, generate_signal
 from .structure import classify_trend, detect_confirmed_swings
@@ -34,6 +36,7 @@ class SetupEvaluation:
     supports: list[PriceZone]
     resistances: list[PriceZone]
     decision: SignalDecision
+    regime: RegimeAssessment
 
     @property
     def evaluated_at(self) -> datetime:
@@ -100,8 +103,9 @@ def closed_bars_at(
     """Return candles whose ``open time + duration`` is at most evaluation_time."""
 
     timestamp = _as_utc_timestamp(evaluation_time)
-    close_times = frame.index + pd.Timedelta(seconds=INTERVAL_SECONDS[timeframe])
-    visible = frame.loc[close_times <= timestamp].tail(history_limit).copy()
+    latest_open = timestamp - pd.Timedelta(seconds=INTERVAL_SECONDS[timeframe])
+    end_position = frame.index.searchsorted(latest_open, side="right")
+    visible = frame.iloc[max(0, end_position - history_limit) : end_position].copy()
     if len(visible) < 210:
         raise InsufficientDataError(
             f"{timeframe} has only {len(visible)} completed bars at {timestamp.isoformat()}"
@@ -134,6 +138,7 @@ def evaluate_setup_at_time(
     trends: dict[str, Trend] = {}
     indicators: dict[str, IndicatorSnapshot] = {}
     timeframe_zones: list[PriceZone] = []
+    visible_data_is_complete = data_is_complete
     for timeframe in REQUIRED_TIMEFRAMES:
         visible = closed_bars_at(
             prepared_frames[timeframe],
@@ -142,6 +147,8 @@ def evaluate_setup_at_time(
             history_limit=config.market.history_limit,
         )
         visible_frames[timeframe] = visible
+        quality = validate_market_data(visible, timeframe)
+        visible_data_is_complete = visible_data_is_complete and quality.grade.value == "valid"
         swings = detect_confirmed_swings(
             visible,
             left=config.strategy.swing_left,
@@ -171,17 +178,43 @@ def evaluate_setup_at_time(
         (zone for zone in merged if zone.level_type == "resistance"),
         key=lambda zone: zone.center_price,
     )[:8]
-    decision = generate_signal(
-        daily_trend=trends["1d"],
-        four_hour_trend=trends["4h"],
-        one_hour_frame=visible_frames["1h"],
-        four_hour_frame=visible_frames["4h"],
-        supports=supports,
-        resistances=resistances,
-        data_is_complete=data_is_complete,
-        config=config,
-        risk_state=risk_state,
+    regime = classify_market_regime(visible_frames["1d"], visible_frames["4h"])
+    effective_risk_state = risk_state or RiskState(
+        date=evaluation_time.date(),
+        daily_start_equity_cny=config.risk.account_equity_cny,
+        current_equity_cny=config.risk.account_equity_cny,
+        peak_equity_cny=config.risk.account_equity_cny,
     )
+    if config.strategy.strategy_variant == "baseline_v0_1_2":
+        decision = generate_signal(
+            daily_trend=trends["1d"],
+            four_hour_trend=trends["4h"],
+            one_hour_frame=visible_frames["1h"],
+            four_hour_frame=visible_frames["4h"],
+            supports=supports,
+            resistances=resistances,
+            data_is_complete=visible_data_is_complete,
+            config=config,
+            risk_state=effective_risk_state,
+        )
+        decision = replace(
+            decision,
+            market_regime=regime.regime,
+            regime_evidence=tuple(regime.evidence),
+            strategy_id="trend_pullback",
+        )
+    else:
+        decision = generate_adaptive_signal(
+            regime=regime,
+            daily_frame=visible_frames["1d"],
+            four_hour_frame=visible_frames["4h"],
+            one_hour_frame=visible_frames["1h"],
+            supports=supports,
+            resistances=resistances,
+            data_is_complete=visible_data_is_complete,
+            config=config,
+            risk_state=effective_risk_state,
+        )
     return SetupEvaluation(
         requested_at=requested_timestamp.to_pydatetime(),
         evaluation_time=evaluation_time,
@@ -193,4 +226,5 @@ def evaluate_setup_at_time(
         supports=supports,
         resistances=resistances,
         decision=decision,
+        regime=regime,
     )

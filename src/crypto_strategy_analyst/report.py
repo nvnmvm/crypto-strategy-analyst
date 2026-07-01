@@ -30,12 +30,13 @@ def analysis_markdown(report: AnalysisReport) -> str:
     """Render the required human-readable Chinese analysis."""
 
     position = report.suggested_position_size
+    currency = "¥" if report.account_currency == "CNY" else "USDT "
     if position == "not_available":
         position_text = "不可用（当前没有通过硬性规则的候选）"
     else:
         position_text = (
-            f"数量 {position.quantity:.8f}，投入约 ¥{position.position_notional_cny:.2f}，"
-            f"止损风险约 ¥{position.risk_amount_cny:.2f}"
+            f"数量 {position.quantity:.8f}，投入约 {currency}{position.position_notional_cny:.2f}，"
+            f"止损风险约 {currency}{position.risk_amount_cny:.2f}"
         )
     quality_lines = "\n".join(
         f"- {timeframe}: {quality.grade.value}，{quality.bars} 根，gap={quality.gap_count}"
@@ -59,18 +60,26 @@ def analysis_markdown(report: AnalysisReport) -> str:
 - 实际策略评估时间（UTC）：{report.evaluation_time.isoformat()}
 - 决策周期：{report.evaluation_timeframe}
 - 已应用时间对齐：{str(report.time_alignment_applied).lower()}
-- 最新完整日线截止：{report.latest_completed_candle_close['1d'].isoformat()}
-- 最新完整 4 小时线截止：{report.latest_completed_candle_close['4h'].isoformat()}
-- 最新完整 1 小时线截止：{report.latest_completed_candle_close['1h'].isoformat()}
+- 最新完整日线截止：{report.latest_completed_candle_close["1d"].isoformat()}
+- 最新完整 4 小时线截止：{report.latest_completed_candle_close["4h"].isoformat()}
+- 最新完整 1 小时线截止：{report.latest_completed_candle_close["1h"].isoformat()}
 - 数据来源：{report.data_source}
 - 市场：Binance 现货
 - 当前价格：{report.current_price:,.4f} USDT
-- 当前账户权益：¥{report.account_equity_cny:,.2f}
+- 当前账户权益：{currency}{report.account_equity_cny:,.2f}
 - 新鲜度重试次数：{report.freshness_retry_attempts}
 
 ## 1. 当前结论
 
 **{report.signal.value}**，确定性评分 **{report.signal_score:.1f}/100**。
+
+- 市场环境：{report.market_regime.value}
+- 选择策略：{report.selected_strategy}
+- 策略周期：{report.strategy_horizon.value}
+- 入场形态：{report.entry_setup}
+- 候选等级：{report.candidate_tier}
+- 风险乘数：{report.risk_multiplier:.2f}
+- 加权确认分：{report.confirmation_score:.1f}（强确认 {report.strong_confirmation_count} 个）
 
 ## 2. 日线趋势
 
@@ -119,7 +128,13 @@ def analysis_markdown(report: AnalysisReport) -> str:
 
 ## 9. 建议入场区域
 
-{_value(report.entry_zone)}
+结构支撑区：{_value(report.support_zone)}
+
+允许入场区：
+
+{_value(report.allowed_entry_range)}
+
+计划入场价：{_value(report.planned_entry_price)}
 
 ## 10. 止损
 
@@ -130,6 +145,7 @@ def analysis_markdown(report: AnalysisReport) -> str:
 - 第一目标（建议减 30%）：{_value(report.take_profit_1)}
 - 第二目标（建议再减 30%）：{_value(report.take_profit_2)}
 - 余下 40%：{report.trailing_stop_method} 移动止损
+- 目标来源：{", ".join(report.target_sources) or "not_available"}
 
 ## 12. 仓位建议
 
@@ -137,7 +153,7 @@ def analysis_markdown(report: AnalysisReport) -> str:
 
 ## 13. 最大可能亏损
 
-{_value(report.maximum_loss_amount)} CNY；该数值与投入金额不同。
+{_value(report.maximum_loss_amount)} {report.account_currency}；该数值与投入金额不同。
 
 ## 14. 不交易的条件
 

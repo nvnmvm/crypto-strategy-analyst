@@ -5,12 +5,18 @@ market:
   symbols: [BTC/USDT, ETH/USDT]
   timeframes: [1d, 4h, 1h]
   history_limit: 500
-  request_timeout_seconds: 15
+  request_connect_timeout_seconds: 5
+  request_read_timeout_seconds: 15
+  request_max_total_seconds: 45
   max_retries: 3
+  retry_backoff_base_seconds: 0.5
+  circuit_failure_threshold: 3
+  circuit_cooldown_seconds: 60
   freshness_retry_count: 3
   freshness_retry_delay_seconds: 20
   freshness_grace_seconds: 90
 risk:
+  account_currency: CNY
   account_equity_cny: 1000.0
   cny_per_usdt: 7.2
   risk_per_trade: 0.01
@@ -19,14 +25,36 @@ risk:
   daily_max_loss: 0.02
   max_drawdown: 0.10
   max_position_fraction: 1.0
+  aggregate_open_risk_limit: 0.02
+  max_symbol_deployed_fraction: 0.60
+  max_total_deployed_fraction: 1.0
+  reserved_cash_fraction: 0.0
   min_reward_risk: 2.0
   trailing_stop_method: atr
   trailing_atr_multiple: 2.0
 strategy:
+  strategy_variant: baseline_v0_1_2
+  strong_buy_score: 75
+  buy_score: 60
+  watch_score: 45
+  b_tier_min_reward_risk: 1.6
+  execution_reward_risk_cushion: 0.2
+  b_tier_risk_multiplier: 0.5
+  sideways_risk_multiplier: 0.5
+  bear_first_risk_multiplier: 0.25
+  bear_drawdown_threshold: 0.25
+  bear_max_deployed_fraction: 0.20
+  maximum_bear_entries: 2
+  short_term_max_holding_days: 14
+  medium_term_max_holding_days: 90
+  long_term_max_holding_days: 180
   swing_left: 3
   swing_right: 3
   level_merge_percent: 0.006
   support_proximity_atr: 1.0
+  entry_zone_depth_atr: 0.25
+  entry_zone_chase_atr: 0.15
+  stop_buffer_atr: 0.50
   volume_ratio_threshold: 1.2
   min_confirmations: 2
   touch_cooldown_bars: 6
@@ -42,6 +70,9 @@ backtest:
   interval: 4h
   fee_rate: 0.001
   slippage_rate: 0.0005
+  split_mode: calendar
+  train_end_date: "2021-12-31"
+  validation_end_date: "2023-12-31"
   train_ratio: 0.6
   validation_ratio: 0.2
   test_ratio: 0.2
@@ -51,3 +82,5 @@ output:
   log_dir: logs
   risk_state_file: state/risk-state.json
   risk_events_file: state/risk-events.jsonl
+  account_state_file: state/account-state.json
+  account_events_file: state/account-events.jsonl

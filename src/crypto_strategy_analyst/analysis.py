@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
+from .account import AccountState
 from .config import AppConfig
 from .data import (
     INTERVAL_SECONDS,
@@ -44,26 +45,69 @@ def _build_report(
     trading_rules: SymbolTradingRules | None,
     *,
     risk_state_initialized: bool,
+    account_state: AccountState | None = None,
 ) -> AnalysisReport:
     decision = evaluation.decision
     current_price = float(evaluation.frames["4h"]["close"].iloc[-1])
+    trading_rules_status = (
+        "exchange_rules_unavailable"
+        if trading_rules is None
+        else "exchange_rules_stale_cache"
+        if "exchange_rules_stale_cache" in trading_rules.data_source
+        else "available"
+    )
     position = None
     if (
         decision.entry_zone
         and decision.stop_loss
         and decision.take_profit_1
-        and decision.take_profit_2
         and decision.label.value.endswith("candidate")
         and freshness.is_fresh
-        and trading_rules is not None
+        and trading_rules_status == "available"
     ):
         try:
+            risk_multiplier = decision.risk_multiplier if decision.risk_multiplier > 0 else 1.0
+            risk_config = config.risk.model_copy(
+                update={
+                    "risk_per_trade": config.risk.risk_per_trade * risk_multiplier,
+                    "max_position_fraction": min(
+                        config.risk.max_position_fraction,
+                        config.strategy.bear_max_deployed_fraction,
+                    )
+                    if decision.strategy_id == "bear_reversal_accumulation"
+                    else config.risk.max_position_fraction,
+                }
+            )
             position = calculate_position(
                 entry_price=current_price,
                 stop_price=decision.stop_loss,
-                config=config.risk,
+                config=risk_config,
                 account_equity_cny=risk_state.current_equity_cny,
                 trading_rules=trading_rules,
+                available_cash_cny=(
+                    account_state.portfolio.available_cash * config.risk.cny_per_usdt
+                    if account_state
+                    else None
+                ),
+                current_symbol_deployed_cny=(
+                    account_state.portfolio.positions.get(
+                        symbol.upper().replace("-", "/")
+                    ).deployed_notional
+                    * config.risk.cny_per_usdt
+                    if account_state
+                    and symbol.upper().replace("-", "/") in account_state.portfolio.positions
+                    else 0.0
+                ),
+                current_total_deployed_cny=(
+                    account_state.portfolio.total_deployed * config.risk.cny_per_usdt
+                    if account_state
+                    else 0.0
+                ),
+                aggregate_open_risk_cny=(
+                    account_state.risk.aggregate_open_risk * config.risk.cny_per_usdt
+                    if account_state
+                    else 0.0
+                ),
             )
         except PositionConstraintError as exc:
             decision = replace(
@@ -73,16 +117,25 @@ def _build_report(
             )
     warnings = [
         "仅使用公开现货行情，不包含订单簿、私有账户或执行能力。",
-        "CNY/USDT 换算使用配置值，不是实时外汇报价。",
+        (
+            "账户以 USDT 计价，quote-to-account rate 固定为 1.0。"
+            if config.risk.account_currency == "USDT"
+            else "CNY/USDT 换算使用配置值，不是实时外汇报价。"
+        ),
         "当前报告是候选计划，实际执行前需要根据下一根4小时开盘价重新验证。",
     ]
     warnings.extend(f"{tf}: {issue}" for tf, item in quality.items() for issue in item.issues)
     warnings.extend(f"阻断条件：{blocker}" for blocker in decision.blockers)
     if trading_rules is None:
-        warnings.append("阻断条件：trading_rules_not_available")
+        warnings.append("阻断条件：exchange_rules_unavailable")
+    elif trading_rules_status == "exchange_rules_stale_cache":
+        warnings.append("阻断条件：exchange_rules_stale_cache；禁止输出仓位建议")
     if freshness_retry_attempts:
         warnings.append(f"数据新鲜度重试 {freshness_retry_attempts} 次。")
-    warnings.append(f"仓位计算使用持久化当前权益 ¥{risk_state.current_equity_cny:.2f}。")
+    warnings.append(
+        f"仓位计算使用持久化当前权益 {risk_state.current_equity_cny:.2f} "
+        f"{config.risk.account_currency}。"
+    )
     if risk_state_initialized:
         warnings.append("风险状态文件原先缺失，已使用配置中的首次初始化权益安全创建。")
     reasons = [
@@ -111,16 +164,24 @@ def _build_report(
         data_source="Binance public spot REST /api/v3/klines (completed candles only)",
         analysis_timeframes=list(REQUIRED_TIMEFRAMES),
         current_price=current_price,
+        account_currency=config.risk.account_currency,
         account_equity_cny=risk_state.current_equity_cny,
         risk_locks=risk_blockers(config.risk, risk_state),
         trading_rules=trading_rules or "not_available",
-        trading_rules_status=(
-            "available" if trading_rules is not None else "trading_rules_not_available"
-        ),
+        trading_rules_status=trading_rules_status,
         data_quality=quality,
         daily_trend=evaluation.trends["1d"],
         four_hour_trend=evaluation.trends["4h"],
         one_hour_trend=evaluation.trends["1h"],
+        market_regime=decision.market_regime or evaluation.regime.regime,
+        regime_evidence=list(decision.regime_evidence or evaluation.regime.evidence),
+        selected_strategy=decision.strategy_id,
+        strategy_horizon=decision.strategy_horizon,
+        entry_setup=decision.entry_setup,
+        candidate_tier=decision.candidate_tier,
+        risk_multiplier=decision.risk_multiplier,
+        confirmation_score=decision.confirmation_score,
+        strong_confirmation_count=decision.strong_confirmation_count,
         one_hour_confirmation=(
             "、".join(item for item in decision.confirmations if item) or "没有足够的入场确认"
         ),
@@ -130,10 +191,14 @@ def _build_report(
         signal=decision.label,
         signal_score=decision.score,
         score_breakdown=decision.breakdown,
+        support_zone=decision.support_zone or "not_available",
+        allowed_entry_range=decision.entry_zone or "not_available",
+        planned_entry_price=decision.planned_entry_price or "not_available",
         entry_zone=decision.entry_zone or "not_available",
         stop_loss=decision.stop_loss or "not_available",
         take_profit_1=decision.take_profit_1 or "not_available",
         take_profit_2=decision.take_profit_2 or "not_available",
+        target_sources=list(decision.target_sources),
         trailing_stop_method=config.risk.trailing_stop_method,
         risk_reward_ratio=(
             round(decision.reward_risk, 4) if decision.reward_risk is not None else "not_available"
@@ -169,6 +234,7 @@ def analyze_frames_at_time(
     risk_state_initialized: bool = False,
     freshness_retry_attempts: int = 0,
     trading_rules: SymbolTradingRules | None = None,
+    account_state: AccountState | None = None,
 ) -> AnalysisReport:
     """Analyze open-time-indexed frames at one aligned completed 4h decision time."""
 
@@ -224,6 +290,7 @@ def analyze_frames_at_time(
         freshness_retry_attempts,
         trading_rules,
         risk_state_initialized=risk_state_initialized,
+        account_state=account_state,
     )
 
 
@@ -236,6 +303,7 @@ def analyze_symbol(
     risk_state_initialized: bool = False,
     requested_at: datetime | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
+    account_state: AccountState | None = None,
 ) -> AnalysisReport:
     """Fetch public frames and align them to the shared completed 4h decision time."""
 
@@ -273,6 +341,7 @@ def analyze_symbol(
         risk_state_initialized=risk_state_initialized,
         freshness_retry_attempts=retry_attempts,
         trading_rules=trading_rules,
+        account_state=account_state,
     )
     LOGGER.info(
         "analysis completed",

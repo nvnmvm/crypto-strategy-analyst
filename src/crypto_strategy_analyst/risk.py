@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from .config import RiskConfig
 from .errors import PositionConstraintError, RiskStateError
 from .models import PositionSuggestion, SymbolTradingRules
-from .trading_rules import floor_to_increment
+from .trading_rules import ceil_to_increment, floor_to_increment
 
 
 class RiskState(BaseModel):
@@ -70,7 +70,7 @@ class RiskState(BaseModel):
         """Reset daily counters on a later UTC date; preserve equity and IDs."""
 
         if current_date <= self.date:
-            return self.model_copy(deep=True)
+            return self.model_copy()
         return self.model_copy(
             update={
                 "date": current_date,
@@ -78,7 +78,6 @@ class RiskState(BaseModel):
                 "daily_realized_loss_cny": 0.0,
                 "daily_start_equity_cny": self.current_equity_cny,
             },
-            deep=True,
         )
 
     def reset_daily(self, current_date: CalendarDate) -> RiskState:
@@ -91,7 +90,6 @@ class RiskState(BaseModel):
                 "daily_realized_loss_cny": 0.0,
                 "daily_start_equity_cny": self.current_equity_cny,
             },
-            deep=True,
         )
 
     def with_equity(self, equity_cny: float) -> RiskState:
@@ -107,7 +105,6 @@ class RiskState(BaseModel):
                 "peak_equity_cny": peak,
                 "current_drawdown": round(min(1.0, drawdown), 12),
             },
-            deep=True,
         )
 
     def with_realized_result(
@@ -140,7 +137,6 @@ class RiskState(BaseModel):
                 "daily_realized_loss_cny": self.daily_realized_loss_cny + loss,
                 "processed_trade_ids": processed,
             },
-            deep=True,
         )
         return updated.with_equity(new_equity)
 
@@ -519,8 +515,12 @@ def calculate_position(
     config: RiskConfig,
     account_equity_cny: float | None = None,
     trading_rules: SymbolTradingRules | None = None,
+    available_cash_cny: float | None = None,
+    current_symbol_deployed_cny: float = 0.0,
+    current_total_deployed_cny: float = 0.0,
+    aggregate_open_risk_cny: float = 0.0,
 ) -> PositionSuggestion:
-    """Size a spot position, always rounding down under public exchange rules."""
+    """Size a cash-only spot position under risk, cash, and exchange constraints."""
 
     if entry_price <= 0 or stop_price <= 0 or stop_price >= entry_price:
         raise ValueError("long position requires 0 < stop_price < entry_price")
@@ -529,15 +529,37 @@ def calculate_position(
         raise ValueError("account_equity_cny must be positive for position sizing")
     rules = trading_rules
     normalized_entry = (
-        floor_to_increment(entry_price, rules.price_tick_size) if rules else entry_price
+        ceil_to_increment(entry_price, rules.price_tick_size) if rules else entry_price
     )
     normalized_stop = floor_to_increment(stop_price, rules.price_tick_size) if rules else stop_price
     if normalized_stop <= 0 or normalized_stop >= normalized_entry:
         raise PositionConstraintError("tick-size rounding invalidated the stop distance")
-    risk_limit = equity_cny * config.risk_per_trade
+    single_trade_limit = equity_cny * config.risk_per_trade
+    portfolio_risk_capacity = max(
+        0.0, equity_cny * config.aggregate_open_risk_limit - aggregate_open_risk_cny
+    )
+    risk_limit = min(single_trade_limit, portfolio_risk_capacity)
+    if risk_limit <= 0:
+        raise PositionConstraintError("aggregate_open_risk_limit_reached")
     stop_fraction = (normalized_entry - normalized_stop) / normalized_entry
     unconstrained_notional = risk_limit / stop_fraction
-    maximum_notional = equity_cny * config.max_position_fraction
+    cash_cap = equity_cny if available_cash_cny is None else max(0.0, available_cash_cny)
+    symbol_cap = max(
+        0.0,
+        equity_cny * config.max_symbol_deployed_fraction - current_symbol_deployed_cny,
+    )
+    total_cap = max(
+        0.0,
+        equity_cny * config.max_total_deployed_fraction - current_total_deployed_cny,
+    )
+    maximum_notional = min(
+        equity_cny * config.max_position_fraction,
+        cash_cap,
+        symbol_cap,
+        total_cap,
+    )
+    if maximum_notional <= 0:
+        raise PositionConstraintError("available_cash_or_deployment_limit_reached")
     notional = min(unconstrained_notional, maximum_notional)
     raw_quantity = notional / (normalized_entry * config.cny_per_usdt)
     step_size = rules.quantity_step_size if rules else 1e-10
