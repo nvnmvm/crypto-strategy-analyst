@@ -1,0 +1,7 @@
+# Copy this file outside Git. Never store API keys here.
+risk:
+  account_equity: 600
+trading:
+  trading_enabled: false
+  testnet: true
+  symbol_whitelist: [BTCUSDT, ETHUSDT]

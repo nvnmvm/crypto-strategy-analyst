@@ -2,6 +2,23 @@
 
 All notable changes follow Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.2.0] - 2026-07-01
+
+### Changed
+
+- Rebuilt analysis around a single public engine, five asset profiles, independent short/swing/long plans, schema 2.0 events and nine top-level commands.
+- Replaced complex account event sourcing with a crash-safe paper account and manual JSONL journal.
+- Archived v0.1.3 reference documents and split configuration into default, asset profile and local override layers.
+
+### Added
+
+- Generic data-source contract, external-data availability states, Generic Profile for arbitrary spot pairs, and honest resistance-aware targets.
+- Opt-in Binance Spot adapter with testnet default, mandatory human confirmation, whitelist/risk/deviation checks, duplicate protection, status recovery and emergency stop.
+
+### Security
+
+- Real trading remains disabled by default. Futures, leverage, margin, shorting, withdrawal and transfer are unsupported; secrets are environment-only.
+
 ## [0.1.3] - 2026-07-01
 
 ### Added

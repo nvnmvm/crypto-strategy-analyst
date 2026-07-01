@@ -1,0 +1,5 @@
+profile: eth
+strategy:
+  entry_confidence: 68
+risk:
+  maximum_position_fraction: 0.28

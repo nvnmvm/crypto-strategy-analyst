@@ -1,0 +1,5 @@
+profile: bnb
+strategy:
+  entry_confidence: 70
+risk:
+  maximum_position_fraction: 0.22
