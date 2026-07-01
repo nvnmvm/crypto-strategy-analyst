@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from .config import AppConfig
-from .models import PriceZone, ScoreBreakdown, SignalLabel, Trend
+from .models import MarketRegime, PriceZone, ScoreBreakdown, SignalLabel, StrategyHorizon, Trend
 from .risk import RiskState, risk_blockers
 from .structure import bullish_reversal_pattern
 
@@ -25,6 +25,17 @@ class SignalDecision:
     take_profit_2: float | None
     reward_risk: float | None
     planned_entry_price: float | None
+    support_zone: PriceZone | None = None
+    market_regime: MarketRegime | None = None
+    regime_evidence: tuple[str, ...] = ()
+    strategy_id: str = "trend_pullback"
+    strategy_horizon: StrategyHorizon = StrategyHorizon.MEDIUM_TERM
+    entry_setup: str = "support_rebound"
+    candidate_tier: str = "none"
+    risk_multiplier: float = 0.0
+    target_sources: tuple[str, ...] = ()
+    confirmation_score: float = 0.0
+    strong_confirmation_count: int = 0
 
 
 def _label_for_score(score: float) -> SignalLabel:
@@ -65,7 +76,22 @@ def generate_signal(
         if zone.lower_price <= current_price + atr * config.strategy.support_proximity_atr
         and current_price - zone.upper_price <= atr * config.strategy.support_proximity_atr
     ]
-    entry_zone = max(nearby_supports, key=lambda zone: zone.strength_score, default=None)
+    support_zone = max(nearby_supports, key=lambda zone: zone.strength_score, default=None)
+    entry_zone: PriceZone | None = None
+    if support_zone is not None:
+        entry_lower = max(
+            support_zone.lower_price,
+            support_zone.upper_price - atr * config.strategy.entry_zone_depth_atr,
+        )
+        entry_upper = support_zone.upper_price + atr * config.strategy.entry_zone_chase_atr
+        entry_zone = support_zone.model_copy(
+            update={
+                "lower_price": entry_lower,
+                "upper_price": entry_upper,
+                "center_price": (entry_lower + entry_upper) / 2,
+                "evidence": [*support_zone.evidence, "derived_entry_zone"],
+            }
+        )
     next_resistance = next(
         (zone for zone in resistances if zone.upper_price > current_price),
         None,
@@ -90,7 +116,7 @@ def generate_signal(
         confirmations.append("macd_momentum_improving")
     if previous["close"] <= previous["ema20"] and current["close"] > current["ema20"]:
         confirmations.append("reclaimed_ema20")
-    if entry_zone and "+" in entry_zone.timeframe:
+    if support_zone and "+" in support_zone.timeframe:
         confirmations.append("multi_timeframe_support")
 
     daily_points = (
@@ -104,7 +130,7 @@ def generate_signal(
         else 0.0
     )
     trend_points = daily_points + four_hour_points
-    level_points = min(25.0, entry_zone.strength_score * 0.25) if entry_zone else 0.0
+    level_points = min(25.0, support_zone.strength_score * 0.25) if support_zone else 0.0
     candle_points = 15.0 if candle_ok else 0.0
     volume_points = 15.0 if "volume_expansion_rebound" in confirmations else 0.0
     indicator_points = sum(
@@ -121,27 +147,31 @@ def generate_signal(
     reward_risk: float | None = None
     space_points = 0.0
     target_blockers: list[str] = []
-    if entry_zone:
-        stop_loss = min(entry_zone.lower_price - atr * 0.5, current_price - atr)
-        if stop_loss > 0 and stop_loss < current_price:
-            one_r = current_price - stop_loss
+    if support_zone and entry_zone:
+        planned_entry = min(max(current_price, entry_zone.lower_price), entry_zone.upper_price)
+        stop_loss = support_zone.lower_price - atr * config.strategy.stop_buffer_atr
+        if stop_loss > 0 and stop_loss < planned_entry:
+            one_r = planned_entry - stop_loss
             if next_resistance is None:
                 target_blockers.append("no_key_resistance_for_targets")
             else:
                 resistance_cap = next_resistance.lower_price - (
                     atr * config.strategy.target_resistance_buffer_atr
                 )
-                available_r = (resistance_cap - current_price) / one_r
+                available_r = (resistance_cap - planned_entry) / one_r
                 reward_risk = max(0.0, available_r)
                 space_points = min(10.0, reward_risk / config.risk.min_reward_risk * 10.0)
                 if available_r < config.risk.min_reward_risk:
                     target_blockers.append("resistance_space_below_two_r")
                 else:
                     target_1 = min(
-                        current_price + config.risk.min_reward_risk * one_r, resistance_cap
+                        planned_entry + config.risk.min_reward_risk * one_r, resistance_cap
                     )
                     if available_r >= config.strategy.min_second_target_r_multiple:
-                        target_2 = min(current_price + 3.0 * one_r, resistance_cap)
+                        target_2 = min(
+                            planned_entry + config.strategy.min_second_target_r_multiple * one_r,
+                            resistance_cap,
+                        )
                     else:
                         target_blockers.append("second_target_unavailable_before_resistance")
 
@@ -200,5 +230,10 @@ def generate_signal(
         take_profit_1=target_1,
         take_profit_2=target_2,
         reward_risk=reward_risk,
-        planned_entry_price=current_price if entry_zone else None,
+        planned_entry_price=(
+            min(max(current_price, entry_zone.lower_price), entry_zone.upper_price)
+            if entry_zone
+            else None
+        ),
+        support_zone=support_zone,
     )

@@ -8,6 +8,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+SAFE_EVENT_FIELDS = {
+    "event_name",
+    "timestamp",
+    "symbol",
+    "operation",
+    "attempt",
+    "duration_ms",
+    "result",
+    "error_type",
+    "evaluation_time",
+    "state_version",
+    "command_id",
+    "signal",
+    "score",
+    "bars",
+}
+
 
 class JsonFormatter(logging.Formatter):
     """Format log records as one JSON object per line."""
@@ -21,7 +38,9 @@ class JsonFormatter(logging.Formatter):
         }
         event_data = getattr(record, "event_data", None)
         if isinstance(event_data, dict):
-            payload["data"] = event_data
+            payload["data"] = {
+                key: value for key, value in event_data.items() if key in SAFE_EVENT_FIELDS
+            }
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, default=str)

@@ -65,6 +65,20 @@ def test_manifest_hash_covers_trading_rule_values(tmp_path, market_frames, tradi
         load_dataset(tmp_path)
 
 
+def test_manifest_hash_covers_all_metadata_and_software_version(
+    tmp_path, market_frames, trading_rules
+):
+    _create_dataset(tmp_path, market_frames, trading_rules)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["manifest_version"] == 2
+    assert manifest["software_version"]
+    manifest["data_source"] = "tampered source"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(DatasetIntegrityError, match="manifest hash mismatch"):
+        load_dataset(tmp_path)
+
+
 def test_same_dataset_and_config_reproduce_metrics(tmp_path, market_frames, trading_rules):
     snapshot = _create_dataset(tmp_path, market_frames, trading_rules)
     start = market_frames["1d"].index[220] + cli_module.pd.Timedelta(days=1)

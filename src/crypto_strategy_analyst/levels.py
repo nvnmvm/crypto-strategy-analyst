@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from .models import PriceZone
@@ -54,11 +55,12 @@ def _candidates(frame: pd.DataFrame, swings: list[SwingPoint]) -> list[Candidate
     return [candidate for candidate in candidates if candidate.price > 0]
 
 
-def _cooldown_events(mask: pd.Series, cooldown_bars: int) -> list[int]:
+def _cooldown_events(mask: pd.Series | np.ndarray, cooldown_bars: int) -> list[int]:
     events: list[int] = []
     last_event = -cooldown_bars
     was_active = False
-    for position, active in enumerate(mask.to_numpy(dtype=bool)):
+    values = mask.to_numpy(dtype=bool) if isinstance(mask, pd.Series) else mask.astype(bool)
+    for position, active in enumerate(values):
         if active and not was_active and position - last_event >= cooldown_bars:
             events.append(position)
             last_event = position
@@ -77,31 +79,39 @@ def _interactions(
     break_atr_multiple: float,
 ) -> ZoneInteractions:
     recent = frame.iloc[-200:]
-    contact_mask = (recent["low"] <= upper) & (recent["high"] >= lower)
+    lows = recent["low"].to_numpy(dtype=float)
+    highs = recent["high"].to_numpy(dtype=float)
+    closes = recent["close"].to_numpy(dtype=float)
+    atr_values = recent["atr14"].to_numpy(dtype=float)
+    contact_mask = (lows <= upper) & (highs >= lower)
     touch_positions = _cooldown_events(contact_mask, cooldown_bars)
     reactions = 0
     for position in touch_positions:
-        row = recent.iloc[position]
-        atr = float(row["atr14"])
-        future = recent.iloc[position + 1 : position + cooldown_bars + 1]
-        if future.empty:
+        atr = atr_values[position]
+        future_start = position + 1
+        future_end = min(len(recent), position + cooldown_bars + 1)
+        if future_start >= future_end or not np.isfinite(atr):
             continue
         if (
             level_type == "support"
-            and float(future["high"].max()) - upper >= atr * reaction_atr_multiple
+            and float(np.max(highs[future_start:future_end])) - upper
+            >= atr * reaction_atr_multiple
         ):
             reactions += 1
         if (
             level_type == "resistance"
-            and lower - float(future["low"].min()) >= atr * reaction_atr_multiple
+            and lower - float(np.min(lows[future_start:future_end]))
+            >= atr * reaction_atr_multiple
         ):
             reactions += 1
 
-    atr_series = recent["atr14"].fillna(float(recent["atr14"].dropna().iloc[-1]))
+    finite_atr = atr_values[np.isfinite(atr_values)]
+    fallback_atr = float(finite_atr[-1]) if len(finite_atr) else 0.0
+    atr_values = np.where(np.isfinite(atr_values), atr_values, fallback_atr)
     if level_type == "support":
-        break_mask = recent["close"] < lower - atr_series * break_atr_multiple
+        break_mask = closes < lower - atr_values * break_atr_multiple
     else:
-        break_mask = recent["close"] > upper + atr_series * break_atr_multiple
+        break_mask = closes > upper + atr_values * break_atr_multiple
     breaks = len(_cooldown_events(break_mask, cooldown_bars))
     last_touch = (
         pd.Timestamp(recent.index[touch_positions[-1]])

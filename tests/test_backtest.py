@@ -3,8 +3,9 @@ from __future__ import annotations
 from itertools import pairwise
 from pathlib import Path
 
-from crypto_strategy_analyst.backtest import run_backtest
+from crypto_strategy_analyst.backtest import _record_daily_realized_result, run_backtest
 from crypto_strategy_analyst.config import AppConfig
+from crypto_strategy_analyst.risk import RiskState
 
 
 def test_backtest_is_finite_and_time_forward(market_frames):
@@ -36,3 +37,18 @@ def test_backtest_has_no_independent_entry_setup():
     ).read_text(encoding="utf-8")
     assert "_entry_setup" not in source
     assert "evaluate_setup_at_time" in source
+
+
+def test_realized_trade_updates_daily_locks_without_inflating_peak_equity():
+    state = RiskState(
+        daily_start_equity_cny=600,
+        current_equity_cny=610,
+        peak_equity_cny=620,
+        current_drawdown=1 - 610 / 620,
+    )
+    win = _record_daily_realized_result(state, 20, stopped_out=False)
+    loss = _record_daily_realized_result(win, -5, stopped_out=True)
+    assert win.current_equity_cny == 610
+    assert win.peak_equity_cny == 620
+    assert loss.daily_realized_loss_cny == 5
+    assert loss.daily_stop_losses == 1

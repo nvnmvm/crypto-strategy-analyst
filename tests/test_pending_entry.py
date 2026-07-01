@@ -52,11 +52,37 @@ def test_normal_next_open_is_valid():
 
 def test_gap_target_reward_risk_and_expiration_cancel():
     signal = _signal()
-    assert "open_above_entry_tolerance" in validate_pending_entry_at_open(signal, 103, 4, AppConfig()).reasons
-    assert "open_above_target_1" in validate_pending_entry_at_open(signal, 111, 30, AppConfig()).reasons
-    weak_reward = replace(signal, entry_zone=signal.entry_zone.model_copy(update={"upper_price": 108}))
-    assert "reward_risk_invalid_after_gap" in validate_pending_entry_at_open(weak_reward, 107, 20, AppConfig()).reasons
-    assert validate_pending_entry_at_open(signal, 100, 4, AppConfig(), age_bars=2).reasons == ["signal_expired"]
+    assert (
+        "open_above_entry_tolerance"
+        in validate_pending_entry_at_open(signal, 103, 4, AppConfig()).reasons
+    )
+    assert (
+        "open_above_target_1"
+        in validate_pending_entry_at_open(signal, 111, 30, AppConfig()).reasons
+    )
+    weak_reward = replace(
+        signal, entry_zone=signal.entry_zone.model_copy(update={"upper_price": 108})
+    )
+    assert (
+        "reward_risk_invalid_after_gap"
+        in validate_pending_entry_at_open(weak_reward, 107, 20, AppConfig()).reasons
+    )
+    assert validate_pending_entry_at_open(signal, 100, 4, AppConfig(), age_bars=2).reasons == [
+        "signal_expired"
+    ]
+
+
+def test_b_tier_uses_its_reduced_1_6r_open_threshold():
+    signal = replace(
+        _signal(),
+        candidate_tier="B",
+        take_profit_1=108.5,
+        take_profit_2=None,
+        reward_risk=1.7,
+    )
+    result = validate_pending_entry_at_open(signal, 100, 4, AppConfig())
+    assert result.is_valid
+    assert result.reward_risk_at_open == 1.7
 
 
 def test_cancelled_pending_signal_creates_no_trade_record(market_frames, monkeypatch):

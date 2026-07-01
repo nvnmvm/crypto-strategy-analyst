@@ -39,7 +39,7 @@ def normalize_symbol(symbol: str) -> str:
 
     cleaned = symbol.strip().upper().replace("-", "/")
     if cleaned not in {"BTC/USDT", "ETH/USDT"}:
-        raise MarketDataError("v0.1.2 supports only BTC/USDT and ETH/USDT")
+        raise MarketDataError("v0.1.3 supports only BTC/USDT and ETH/USDT")
     return cleaned.replace("/", "")
 
 
@@ -57,38 +57,96 @@ class BinancePublicClient:
     def __init__(self, config: MarketConfig, client: httpx.Client | None = None) -> None:
         self.config = config
         self._client = client
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+        self._rules_cache: dict[str, SymbolTradingRules] = {}
 
     def _request_json(self, path: str, params: dict[str, Any]) -> Any:
+        operation = "exchange_rules" if path.endswith("exchangeInfo") else "market_data"
+        now = time.monotonic()
+        if now < self._circuit_open_until:
+            raise MarketDataError(f"circuit_open:{operation}")
+        started = now
         errors: list[str] = []
         for base_url in BINANCE_BASE_URLS:
             for attempt in range(1, self.config.max_retries + 1):
+                if time.monotonic() - started >= self.config.request_max_total_seconds:
+                    errors.append("maximum_total_duration_exceeded")
+                    break
+                attempt_started = time.monotonic()
                 try:
+                    timeout = httpx.Timeout(
+                        connect=self.config.request_connect_timeout_seconds,
+                        read=self.config.request_read_timeout_seconds,
+                        write=self.config.request_read_timeout_seconds,
+                        pool=self.config.request_connect_timeout_seconds,
+                    )
                     if self._client is None:
                         response = httpx.get(
                             f"{base_url}{path}",
                             params=params,
-                            timeout=self.config.request_timeout_seconds,
+                            timeout=timeout,
                             follow_redirects=False,
                         )
                     else:
                         response = self._client.get(
                             f"{base_url}{path}",
                             params=params,
-                            timeout=self.config.request_timeout_seconds,
+                            timeout=timeout,
                         )
                     response.raise_for_status()
                     payload = response.json()
+                    self._consecutive_failures = 0
                     LOGGER.info(
-                        "public klines fetched",
-                        extra={"event_data": {"base_url": base_url, "bars": len(payload)}},
+                        "public Binance request completed",
+                        extra={
+                            "event_data": {
+                                "event_name": "public_request",
+                                "symbol": params.get("symbol"),
+                                "operation": operation,
+                                "attempt": attempt,
+                                "duration_ms": round(
+                                    (time.monotonic() - attempt_started) * 1000, 2
+                                ),
+                                "result": "success",
+                                "error_type": None,
+                            }
+                        },
                     )
                     return payload
                 except (httpx.HTTPError, ValueError, MarketDataError) as exc:
+                    self._consecutive_failures += 1
                     errors.append(f"{base_url} attempt {attempt}: {type(exc).__name__}")
+                    LOGGER.warning(
+                        "public Binance request failed",
+                        extra={
+                            "event_data": {
+                                "event_name": "public_request",
+                                "symbol": params.get("symbol"),
+                                "operation": operation,
+                                "attempt": attempt,
+                                "duration_ms": round(
+                                    (time.monotonic() - attempt_started) * 1000, 2
+                                ),
+                                "result": "failure",
+                                "error_type": type(exc).__name__,
+                            }
+                        },
+                    )
+                    if self._consecutive_failures >= self.config.circuit_failure_threshold:
+                        self._circuit_open_until = (
+                            time.monotonic() + self.config.circuit_cooldown_seconds
+                        )
+                        raise MarketDataError(f"circuit_open:{operation}") from exc
                     if attempt < self.config.max_retries:
-                        time.sleep(min(0.25 * (2 ** (attempt - 1)), 1.0))
+                        delay = self.config.retry_backoff_base_seconds * (2 ** (attempt - 1))
+                        remaining = self.config.request_max_total_seconds - (
+                            time.monotonic() - started
+                        )
+                        if delay > 0 and remaining > 0:
+                            time.sleep(min(delay, remaining))
         raise MarketDataError(
-            "public Binance request failed after bounded retries: " + "; ".join(errors)
+            f"{operation}_unavailable after bounded retries: " + "; ".join(errors)
         )
 
     def _request(self, params: dict[str, Any]) -> list[list[Any]]:
@@ -101,7 +159,15 @@ class BinancePublicClient:
         """Fetch public Binance spot precision and minimum-notional filters."""
 
         compact_symbol = normalize_symbol(symbol)
-        payload = self._request_json("/api/v3/exchangeInfo", {"symbol": compact_symbol})
+        try:
+            payload = self._request_json("/api/v3/exchangeInfo", {"symbol": compact_symbol})
+        except MarketDataError:
+            cached = self._rules_cache.get(compact_symbol)
+            if cached is not None:
+                return cached.model_copy(
+                    update={"data_source": f"{cached.data_source} [exchange_rules_stale_cache]"}
+                )
+            raise
         try:
             symbols = payload["symbols"]
             item = next(value for value in symbols if value["symbol"] == compact_symbol)
@@ -114,7 +180,7 @@ class BinancePublicClient:
             notional_filter = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL")
             if notional_filter is None:
                 raise KeyError("MIN_NOTIONAL/NOTIONAL")
-            return SymbolTradingRules(
+            rules = SymbolTradingRules(
                 symbol=symbol.upper().replace("-", "/"),
                 price_tick_size=float(price_filter["tickSize"]),
                 quantity_step_size=float(quantity_filter["stepSize"]),
@@ -128,6 +194,8 @@ class BinancePublicClient:
                 fetched_at=datetime.now(UTC),
                 data_source="Binance public spot REST /api/v3/exchangeInfo",
             )
+            self._rules_cache[compact_symbol] = rules
+            return rules
         except (KeyError, StopIteration, TypeError, ValueError) as exc:
             raise MarketDataError("Binance exchangeInfo is missing required spot filters") from exc
 
@@ -259,12 +327,14 @@ def validate_market_data(
             fatal = True
     expected = pd.Timedelta(seconds=INTERVAL_SECONDS[interval])
     missing_intervals: list[str] = []
+    gap_count = 0
     if len(frame.index) > 1 and frame.index.is_monotonic_increasing:
         deltas = frame.index.to_series().diff().dropna()
         gaps = deltas[deltas > expected * 1.01]
+        gap_count = len(gaps)
         missing_intervals = [str(ts) for ts in gaps.index[:20]]
-        if len(gaps):
-            issues.append(f"time gaps detected: {len(gaps)}")
+        if gap_count:
+            issues.append(f"time gaps detected: {gap_count}")
     grade = (
         QualityGrade.INVALID
         if fatal
@@ -277,7 +347,7 @@ def validate_market_data(
         bars=len(frame),
         expected_interval=interval,
         duplicate_count=duplicate_count,
-        gap_count=len(missing_intervals),
+        gap_count=gap_count,
         missing_intervals=missing_intervals,
         issues=issues,
     )

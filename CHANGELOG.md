@@ -2,6 +2,28 @@
 
 All notable changes follow Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.1.3] - 2026-07-01
+
+### Added
+
+- Book-to-requirement distillation, objective strategy definitions, parameter registry, backtest assumptions, robustness protocol, monitoring rules, and evidence levels.
+- Unified v3 account materialized state, append-only account events, idempotent versioned commands, pending plans, portfolio cash/positions, aggregate open risk, WAL recovery, and v2 migration backups.
+- Separate support and entry zones, bounded public-request timeouts/backoff/circuit breaking, explicit exchange-rule degradation, research audit fields, and full-manifest hashing.
+- Six deterministic market regimes; separate short-, medium-, and long-horizon plans; weighted confirmations; support rebound, breakout-retest, continuation, and guarded bear-reversal setups.
+- A/B target tiers, execution-R cushion, cost-derived allowed entry ranges, two-entry bear cap without averaging down, time exits, rolling frozen-parameter windows, concentration metrics, and cost-aware buy/hold and DCA benchmarks.
+- `research diagnose` and `research compare-strategies` commands with candidate funnels, blockers by regime, cancellation reasons, fixed calendar holdouts, and all four preregistered strategy versions.
+
+### Fixed
+
+- Made simulated buy/sell tick rounding conservative and renamed fixed 60/20/20 output to `chronological_holdout_split`.
+- Applied cash, per-symbol deployment, total deployment, exchange minimum, and portfolio-risk limits to position suggestions.
+- Corrected B-tier next-open validation to use 1.6R and made two-bar pending plans actually survive only non-terminal first-open misses.
+- Removed a backtest risk-state double count that could preserve a phantom peak equity after closing a marked-to-market position and falsely activate the drawdown lock.
+
+### Security
+
+- The package still has no private API, API keys, live orders, leverage, futures, margin, shorting, withdrawals, martingale, or grid averaging down.
+
 ## [0.1.2] - 2026-07-01
 
 ### Added

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,8 +20,12 @@ from .execution import validate_pending_entry_at_open
 from .models import (
     BacktestMetrics,
     BacktestResult,
+    BenchmarkMetrics,
     CostScenarioMetrics,
+    MarketRegime,
+    ResearchProtocol,
     SignalLabel,
+    StrategyHorizon,
     SymbolTradingRules,
     TradeRecord,
     Trend,
@@ -28,6 +33,7 @@ from .models import (
 from .risk import RiskState, calculate_position
 from .signal import SignalDecision
 from .strategy import SetupEvaluation, evaluate_setup_at_time, prepare_market_frames
+from .trading_rules import ceil_to_increment, floor_to_increment
 
 
 @dataclass(slots=True)
@@ -36,6 +42,7 @@ class _PendingEntry:
     atr: float
     created_index: int
     regime: Trend
+    tranche_number: int = 1
 
 
 @dataclass(slots=True)
@@ -47,7 +54,7 @@ class _Position:
     remaining_quantity: float
     stop_price: float
     target_1: float
-    target_2: float
+    target_2: float | None
     target_1_done: bool
     target_2_done: bool
     entry_cost: float
@@ -56,6 +63,31 @@ class _Position:
     slippage: float
     regime: Trend
     initial_risk_cny: float
+    strategy_id: str
+    risk_multiplier: float
+    market_regime_detail: MarketRegime | None
+    entry_setup: str
+    candidate_tier: str
+    strategy_horizon: StrategyHorizon
+    entry_count: int = 1
+
+
+def conservative_buy_fill(
+    reference_price: float,
+    slippage_rate: float,
+    trading_rules: SymbolTradingRules | None,
+) -> float:
+    slipped = reference_price * (1 + slippage_rate)
+    return ceil_to_increment(slipped, trading_rules.price_tick_size) if trading_rules else slipped
+
+
+def conservative_sell_fill(
+    reference_price: float,
+    slippage_rate: float,
+    trading_rules: SymbolTradingRules | None,
+) -> float:
+    slipped = reference_price * (1 - slippage_rate)
+    return floor_to_increment(slipped, trading_rules.price_tick_size) if trading_rules else slipped
 
 
 def _utc_timestamp(value: str | datetime | None) -> pd.Timestamp | None:
@@ -99,6 +131,21 @@ def _finite(value: float) -> float:
     return round(float(value), 8) if np.isfinite(value) else 0.0
 
 
+def _record_daily_realized_result(
+    risk_state: RiskState, pnl_cny: float, *, stopped_out: bool
+) -> RiskState:
+    """Update daily locks without double-counting already marked-to-market equity."""
+
+    realized_loss = max(0.0, -pnl_cny)
+    return risk_state.model_copy(
+        update={
+            "daily_stop_losses": risk_state.daily_stop_losses
+            + int(stopped_out and realized_loss > 0),
+            "daily_realized_loss_cny": risk_state.daily_realized_loss_cny + realized_loss,
+        }
+    )
+
+
 def _metrics(
     equity: pd.Series,
     trades: list[TradeRecord],
@@ -133,6 +180,17 @@ def _metrics(
     profit_factor = sum(wins) / sum(losses) if losses else (999.0 if wins else 0.0)
     outcomes = [trade.pnl > 0 for trade in trades]
     realized_r = [trade.realized_r_multiple for trade in trades]
+    best_trade = max((trade.pnl for trade in trades), default=0.0)
+    worst_trade = min((trade.pnl for trade in trades), default=0.0)
+    net_profit = final - initial
+    yearly_equity = equity.resample("YE").last()
+    yearly_profit = yearly_equity.diff().fillna(yearly_equity.iloc[0] - initial)
+    best_year_profit = float(yearly_profit.max()) if len(yearly_profit) else 0.0
+    below_peak = equity < equity.cummax()
+    longest_bars = current_bars = 0
+    for is_below in below_peak:
+        current_bars = current_bars + 1 if is_below else 0
+        longest_bars = max(longest_bars, current_bars)
     return BacktestMetrics(
         total_return=_finite(total_return),
         annualized_return=_finite(annualized),
@@ -163,23 +221,44 @@ def _metrics(
         ),
         average_realized_r_multiple=_finite(float(np.mean(realized_r)) if realized_r else 0.0),
         median_realized_r_multiple=_finite(float(np.median(realized_r)) if realized_r else 0.0),
+        annualized_volatility=_finite(standard_deviation * np.sqrt(bars_per_year)),
+        longest_drawdown_recovery_days=_finite(longest_bars / 6),
+        best_trade_pnl=_finite(best_trade),
+        worst_trade_pnl=_finite(worst_trade),
+        best_trade_profit_contribution=_finite(best_trade / net_profit if net_profit > 0 else 0.0),
+        best_year_profit_contribution=_finite(
+            best_year_profit / net_profit if net_profit > 0 else 0.0
+        ),
+        return_without_best_trade=_finite((net_profit - best_trade) / initial),
+        return_without_best_year=_finite((net_profit - best_year_profit) / initial),
     )
 
 
 def _time_split_results(equity: pd.Series, config: AppConfig) -> dict[str, dict[str, object]]:
-    """Report fixed chronological splits; this is not walk-forward optimization."""
+    """Report preregistered calendar splits or legacy fixed-ratio splits."""
 
-    length = len(equity)
-    train_end = max(1, int(length * config.backtest.train_ratio))
-    validation_end = max(
-        train_end + 1,
-        int(length * (config.backtest.train_ratio + config.backtest.validation_ratio)),
-    )
-    slices = {
-        "train": equity.iloc[:train_end],
-        "validation": equity.iloc[train_end:validation_end],
-        "test": equity.iloc[validation_end:],
-    }
+    if config.backtest.split_mode == "calendar":
+        train_end = pd.Timestamp(config.backtest.train_end_date, tz="UTC") + pd.Timedelta(days=1)
+        validation_end = pd.Timestamp(config.backtest.validation_end_date, tz="UTC") + pd.Timedelta(
+            days=1
+        )
+        slices = {
+            "train": equity[equity.index < train_end],
+            "validation": equity[(equity.index >= train_end) & (equity.index < validation_end)],
+            "test": equity[equity.index >= validation_end],
+        }
+    else:
+        length = len(equity)
+        train_position = max(1, int(length * config.backtest.train_ratio))
+        validation_position = max(
+            train_position + 1,
+            int(length * (config.backtest.train_ratio + config.backtest.validation_ratio)),
+        )
+        slices = {
+            "train": equity.iloc[:train_position],
+            "validation": equity.iloc[train_position:validation_position],
+            "test": equity.iloc[validation_position:],
+        }
     result: dict[str, dict[str, object]] = {}
     for name, values in slices.items():
         if len(values) < 2:
@@ -191,6 +270,124 @@ def _time_split_results(equity: pd.Series, config: AppConfig) -> dict[str, dict[
                 "return": _finite(float(values.iloc[-1] / values.iloc[0] - 1)),
             }
     return result
+
+
+def _rolling_window_results(equity: pd.Series) -> list[dict[str, object]]:
+    """Evaluate a frozen strategy over rolling 365-day windows stepped by 180 days."""
+
+    windows: list[dict[str, object]] = []
+    cursor = equity.index[0]
+    final_time = equity.index[-1]
+    while cursor + pd.Timedelta(days=365) <= final_time:
+        end = cursor + pd.Timedelta(days=365)
+        values = equity[(equity.index >= cursor) & (equity.index <= end)]
+        if len(values) >= 2:
+            drawdown = values / values.cummax() - 1
+            windows.append(
+                {
+                    "start": values.index[0].isoformat(),
+                    "end": values.index[-1].isoformat(),
+                    "return": _finite(float(values.iloc[-1] / values.iloc[0] - 1)),
+                    "max_drawdown": _finite(abs(float(drawdown.min()))),
+                    "positive": bool(values.iloc[-1] > values.iloc[0]),
+                }
+            )
+        cursor += pd.Timedelta(days=180)
+    return windows
+
+
+def _benchmark_summary(
+    equity: pd.Series,
+    *,
+    initial: float,
+    fees: float,
+    transaction_count: int,
+    exposure_percent: float,
+) -> BenchmarkMetrics:
+    returns = equity.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    drawdown = equity / equity.cummax() - 1
+    days = max((equity.index[-1] - equity.index[0]).total_seconds() / 86_400, 1)
+    total_return = float(equity.iloc[-1] / initial - 1)
+    annualized = (1 + total_return) ** (365.25 / days) - 1 if total_return > -1 else -1.0
+    below_peak = equity < equity.cummax()
+    longest = current = 0
+    for value in below_peak:
+        current = current + 1 if value else 0
+        longest = max(longest, current)
+    return BenchmarkMetrics(
+        total_return=_finite(total_return),
+        annualized_return=_finite(annualized),
+        max_drawdown=_finite(abs(float(drawdown.min()))),
+        annualized_volatility=_finite(float(returns.std(ddof=1)) * np.sqrt(365.25 * 6)),
+        exposure_percent=_finite(exposure_percent),
+        longest_drawdown_recovery_days=_finite(longest / 6),
+        total_fees=_finite(fees),
+        transaction_count=transaction_count,
+    )
+
+
+def _benchmarks(
+    four_hour: pd.DataFrame,
+    replay_positions: np.ndarray,
+    config: AppConfig,
+    trading_rules: SymbolTradingRules | None,
+) -> dict[str, BenchmarkMetrics]:
+    """Cost-aware lump-sum and fixed-total monthly DCA reference portfolios."""
+
+    rows = four_hour.iloc[replay_positions]
+    times = pd.DatetimeIndex(rows.index + pd.Timedelta(hours=4))
+    initial = config.risk.account_equity_cny / config.risk.cny_per_usdt
+    first_open = float(rows["open"].iloc[0])
+    buy_fill = conservative_buy_fill(first_open, config.backtest.slippage_rate, trading_rules)
+    buy_quantity = initial / (buy_fill * (1 + config.backtest.fee_rate))
+    buy_fee = buy_quantity * buy_fill * config.backtest.fee_rate
+    lump_equity = pd.Series(buy_quantity * rows["close"].to_numpy(), index=times)
+    final_sell = conservative_sell_fill(
+        float(rows["close"].iloc[-1]), config.backtest.slippage_rate, trading_rules
+    )
+    final_fee = buy_quantity * final_sell * config.backtest.fee_rate
+    lump_equity.iloc[-1] = buy_quantity * final_sell - final_fee
+
+    month_keys = times.tz_localize(None).to_period("M")
+    month_starts = np.flatnonzero(~month_keys.duplicated())
+    allocation = initial / len(month_starts)
+    dca_cash = initial
+    dca_quantity = 0.0
+    dca_fees = 0.0
+    dca_values: list[float] = []
+    dca_exposure: list[float] = []
+    month_start_set = set(month_starts.tolist())
+    for position, (_, row) in enumerate(rows.iterrows()):
+        if position in month_start_set:
+            fill = conservative_buy_fill(
+                float(row["open"]), config.backtest.slippage_rate, trading_rules
+            )
+            quantity = allocation / (fill * (1 + config.backtest.fee_rate))
+            fee = quantity * fill * config.backtest.fee_rate
+            dca_cash -= quantity * fill + fee
+            dca_quantity += quantity
+            dca_fees += fee
+        dca_values.append(dca_cash + dca_quantity * float(row["close"]))
+        dca_exposure.append(1 - dca_cash / initial)
+    dca_final_fee = dca_quantity * final_sell * config.backtest.fee_rate
+    dca_values[-1] = dca_cash + dca_quantity * final_sell - dca_final_fee
+    dca_equity = pd.Series(dca_values, index=times)
+    return {
+        "buy_and_hold": _benchmark_summary(
+            lump_equity,
+            initial=initial,
+            fees=(buy_fee + final_fee) * config.risk.cny_per_usdt,
+            transaction_count=2,
+            exposure_percent=100.0,
+        ),
+        "fixed_total_monthly_dca": _benchmark_summary(
+            dca_equity,
+            initial=initial,
+            fees=(dca_fees + dca_final_fee) * config.risk.cny_per_usdt,
+            transaction_count=len(month_starts) + 1,
+            exposure_percent=_finite(float(np.mean(dca_exposure) * 100)),
+        ),
+    }
 
 
 def _record_closed_trade(
@@ -216,6 +413,11 @@ def _record_closed_trade(
         holding_hours=(timestamp - position.entry_time).total_seconds() / 3600,
         exit_reason=exit_reason,
         market_regime=position.regime,
+        market_regime_detail=position.market_regime_detail,
+        strategy_id=position.strategy_id,
+        entry_setup=position.entry_setup,
+        candidate_tier=position.candidate_tier,
+        strategy_horizon=position.strategy_horizon,
         initial_risk_cny=position.initial_risk_cny,
         realized_r_multiple=(
             pnl_quote * rate / position.initial_risk_cny if position.initial_risk_cny > 0 else 0.0
@@ -227,9 +429,7 @@ def _frames_hash(frames: Mapping[str, pd.DataFrame]) -> str:
     digest = hashlib.sha256()
     for timeframe in ("1d", "4h", "1h"):
         digest.update(timeframe.encode())
-        digest.update(
-            frames[timeframe].to_csv(index=True, float_format="%.12g").encode("utf-8")
-        )
+        digest.update(frames[timeframe].to_csv(index=True, float_format="%.12g").encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -246,10 +446,13 @@ def _strategy_config_hash(config: AppConfig) -> str:
 
 
 def _package_version() -> str:
+    source_version = Path(__file__).resolve().parents[2] / "VERSION"
+    if source_version.is_file():
+        return source_version.read_text(encoding="utf-8").strip()
     try:
         return version("crypto-strategy-analyst")
     except PackageNotFoundError:  # pragma: no cover
-        return "0.1.2"
+        return "0.1.3"
 
 
 def run_backtest(
@@ -298,6 +501,9 @@ def run_backtest(
     total_fees = total_slippage = 0.0
     generated_signal_count = executed_entry_count = cancelled_entry_count = no_trade_count = 0
     cancelled_reasons: Counter[str] = Counter()
+    signal_labels: Counter[str] = Counter()
+    decision_blockers: Counter[str] = Counter()
+    blockers_by_regime: dict[str, Counter[str]] = defaultdict(Counter)
     exposure_flags: list[float] = []
     capital_utilization: list[float] = []
     risk_state = RiskState(
@@ -313,9 +519,11 @@ def run_backtest(
         row = four_hour.iloc[index]
         risk_state = risk_state.rolled_to(close_time.date())
 
-        if pending is not None and position is None:
+        if pending is not None and (position is None or pending.tranche_number == 2):
             raw_open = float(row["open"])
-            entry_price = raw_open * (1 + config.backtest.slippage_rate)
+            entry_price = conservative_buy_fill(
+                raw_open, config.backtest.slippage_rate, trading_rules
+            )
             validation = validate_pending_entry_at_open(
                 pending.signal,
                 entry_price,
@@ -326,10 +534,26 @@ def run_backtest(
             if validation.is_valid:
                 suggestion = None
                 try:
+                    risk_multiplier = (
+                        pending.signal.risk_multiplier
+                        if pending.signal.risk_multiplier > 0
+                        else 1.0
+                    )
+                    risk_config = config.risk.model_copy(
+                        update={
+                            "risk_per_trade": config.risk.risk_per_trade * risk_multiplier,
+                            "max_position_fraction": min(
+                                config.risk.max_position_fraction,
+                                config.strategy.bear_max_deployed_fraction,
+                            )
+                            if pending.signal.strategy_id == "bear_reversal_accumulation"
+                            else config.risk.max_position_fraction,
+                        }
+                    )
                     suggestion = calculate_position(
                         entry_price=entry_price,
                         stop_price=float(pending.signal.stop_loss),
-                        config=config.risk,
+                        config=risk_config,
                         account_equity_cny=cash * rate,
                         trading_rules=trading_rules,
                     )
@@ -345,6 +569,50 @@ def run_backtest(
                     if notional + fee > cash:
                         cancelled_reasons["insufficient_cash_after_fees"] += 1
                         cancelled_entry_count += 1
+                    elif pending.tranche_number == 2:
+                        if position is None or position.strategy_id != "bear_reversal_accumulation":
+                            cancelled_reasons["second_entry_requires_bear_position"] += 1
+                            cancelled_entry_count += 1
+                        elif position.entry_count >= config.strategy.maximum_bear_entries:
+                            cancelled_reasons["maximum_bear_entries_reached"] += 1
+                            cancelled_entry_count += 1
+                        elif normalized_entry < position.entry_price:
+                            cancelled_reasons["second_entry_would_average_down"] += 1
+                            cancelled_entry_count += 1
+                        else:
+                            equity_quote_at_open = cash + position.remaining_quantity * raw_open
+                            total_risk = position.initial_risk_cny + suggestion.risk_amount_cny
+                            risk_limit = equity_quote_at_open * rate * config.risk.risk_per_trade
+                            deployed_after = (
+                                position.entry_price * position.original_quantity + notional
+                            )
+                            if deployed_after > (
+                                equity_quote_at_open * config.strategy.bear_max_deployed_fraction
+                                + 1e-9
+                            ):
+                                cancelled_reasons["second_entry_bear_deployment_exceeded"] += 1
+                                cancelled_entry_count += 1
+                            elif total_risk > risk_limit + 1e-9:
+                                cancelled_reasons["second_entry_total_risk_exceeded"] += 1
+                                cancelled_entry_count += 1
+                            else:
+                                cash -= notional + fee
+                                total_fees += fee
+                                total_slippage += slip
+                                total_quantity = position.original_quantity + quantity
+                                average_entry = (
+                                    position.entry_price * position.original_quantity
+                                    + normalized_entry * quantity
+                                ) / total_quantity
+                                position.entry_price = average_entry
+                                position.original_quantity = total_quantity
+                                position.remaining_quantity += quantity
+                                position.entry_cost += notional + fee
+                                position.fees += fee
+                                position.slippage += slip
+                                position.initial_risk_cny = total_risk
+                                position.entry_count = 2
+                                executed_entry_count += 1
                     else:
                         cash -= notional + fee
                         total_fees += fee
@@ -357,7 +625,11 @@ def run_backtest(
                             remaining_quantity=quantity,
                             stop_price=suggestion.stop_price,
                             target_1=float(pending.signal.take_profit_1),
-                            target_2=float(pending.signal.take_profit_2),
+                            target_2=(
+                                float(pending.signal.take_profit_2)
+                                if pending.signal.take_profit_2 is not None
+                                else None
+                            ),
                             target_1_done=False,
                             target_2_done=False,
                             entry_cost=notional + fee,
@@ -366,19 +638,39 @@ def run_backtest(
                             slippage=slip,
                             regime=pending.regime,
                             initial_risk_cny=suggestion.risk_amount_cny,
+                            strategy_id=pending.signal.strategy_id,
+                            risk_multiplier=risk_multiplier,
+                            market_regime_detail=pending.signal.market_regime,
+                            entry_setup=pending.signal.entry_setup,
+                            candidate_tier=pending.signal.candidate_tier,
+                            strategy_horizon=pending.signal.strategy_horizon,
                         )
                         executed_entry_count += 1
             else:
-                cancelled_entry_count += 1
-                cancelled_reasons.update(validation.reasons)
-            pending = None
+                terminal_reasons = {
+                    "signal_expired",
+                    "open_below_stop",
+                    "open_above_target_1",
+                    "invalid_target_order",
+                    "signal_incomplete",
+                }
+                if terminal_reasons.intersection(validation.reasons) or (
+                    index - pending.created_index >= config.strategy.pending_signal_valid_bars
+                ):
+                    cancelled_entry_count += 1
+                    cancelled_reasons.update(validation.reasons)
+                    pending = None
+            if validation.is_valid:
+                pending = None
 
         closed_reason: str | None = None
         if position is not None:
             low, high, open_price = float(row["low"]), float(row["high"]), float(row["open"])
             if low <= position.stop_price:
                 raw_exit = min(open_price, position.stop_price)
-                exit_price = raw_exit * (1 - config.backtest.slippage_rate)
+                exit_price = conservative_sell_fill(
+                    raw_exit, config.backtest.slippage_rate, trading_rules
+                )
                 quantity = position.remaining_quantity
                 proceeds = quantity * exit_price
                 fee = proceeds * config.backtest.fee_rate
@@ -393,10 +685,48 @@ def run_backtest(
                 closed_reason = (
                     "entry_bar_protective_stop" if index == position.entry_index else "stop_loss"
                 )
+            elif index > position.entry_index and (
+                (
+                    position.strategy_horizon == StrategyHorizon.SHORT_TERM
+                    and (timestamp - position.entry_time).total_seconds()
+                    >= config.strategy.short_term_max_holding_days * 86_400
+                    and float(row["close"]) < float(row["ema20"])
+                )
+                or (
+                    position.strategy_horizon == StrategyHorizon.MEDIUM_TERM
+                    and (timestamp - position.entry_time).total_seconds()
+                    >= config.strategy.medium_term_max_holding_days * 86_400
+                    and float(row["close"]) < float(row["ema50"])
+                )
+                or (
+                    position.strategy_horizon == StrategyHorizon.LONG_TERM
+                    and (timestamp - position.entry_time).total_seconds()
+                    >= config.strategy.long_term_max_holding_days * 86_400
+                    and float(row["close"]) < float(row["ema50"])
+                )
+            ):
+                raw_exit = float(row["close"])
+                exit_price = conservative_sell_fill(
+                    raw_exit, config.backtest.slippage_rate, trading_rules
+                )
+                quantity = position.remaining_quantity
+                proceeds = quantity * exit_price
+                fee = proceeds * config.backtest.fee_rate
+                slip = quantity * (raw_exit - exit_price)
+                cash += proceeds - fee
+                position.exit_proceeds += proceeds - fee
+                position.fees += fee
+                position.slippage += slip
+                total_fees += fee
+                total_slippage += slip
+                position.remaining_quantity = 0.0
+                closed_reason = f"{position.strategy_horizon.value}_time_exit"
             elif index > position.entry_index:
                 if not position.target_1_done and high >= position.target_1:
                     quantity = min(position.original_quantity * 0.30, position.remaining_quantity)
-                    exit_price = position.target_1 * (1 - config.backtest.slippage_rate)
+                    exit_price = conservative_sell_fill(
+                        position.target_1, config.backtest.slippage_rate, trading_rules
+                    )
                     proceeds = quantity * exit_price
                     fee = proceeds * config.backtest.fee_rate
                     slip = quantity * (position.target_1 - exit_price)
@@ -411,10 +741,13 @@ def run_backtest(
                 if (
                     position.target_1_done
                     and not position.target_2_done
+                    and position.target_2 is not None
                     and high >= position.target_2
                 ):
                     quantity = min(position.original_quantity * 0.30, position.remaining_quantity)
-                    exit_price = position.target_2 * (1 - config.backtest.slippage_rate)
+                    exit_price = conservative_sell_fill(
+                        position.target_2, config.backtest.slippage_rate, trading_rules
+                    )
                     proceeds = quantity * exit_price
                     fee = proceeds * config.backtest.fee_rate
                     slip = quantity * (position.target_2 - exit_price)
@@ -444,7 +777,8 @@ def run_backtest(
                     rate=rate,
                 )
                 trades.append(trade)
-                risk_state = risk_state.with_realized_result(
+                risk_state = _record_daily_realized_result(
+                    risk_state,
                     trade.pnl,
                     stopped_out=bool(closed_reason and "stop" in closed_reason),
                 )
@@ -463,6 +797,32 @@ def run_backtest(
             else 0.0
         )
 
+        # A plan may survive one missed open, but not an intrabar stop/TP1
+        # breach or a change to an incompatible market regime.
+        if pending is not None and (position is None or pending.tranche_number == 2):
+            invalidated: list[str] = []
+            if float(row["low"]) <= float(pending.signal.stop_loss):
+                invalidated.append("pending_price_crossed_stop")
+            if float(row["high"]) >= float(pending.signal.take_profit_1):
+                invalidated.append("pending_price_crossed_target_1")
+            if (
+                not invalidated
+                and index - pending.created_index < config.strategy.pending_signal_valid_bars
+            ):
+                pending_evaluation = evaluate_setup_at_time(
+                    prepared,
+                    config,
+                    requested_at=close_time.to_pydatetime(),
+                    risk_state=risk_state,
+                    data_is_complete=True,
+                )
+                if pending_evaluation.regime.selected_strategy != pending.signal.strategy_id:
+                    invalidated.append("pending_market_regime_worsened")
+            if invalidated:
+                cancelled_entry_count += 1
+                cancelled_reasons.update(invalidated)
+                pending = None
+
         if position is None and pending is None and replay_index < len(replay_positions) - 1:
             evaluation = evaluate_setup_at_time(
                 prepared,
@@ -474,11 +834,11 @@ def run_backtest(
             if decision_observer:
                 decision_observer(close_time.to_pydatetime(), evaluation)
             decision = evaluation.decision
+            signal_labels[decision.label.value] += 1
             if (
                 decision.label in {SignalLabel.BUY_CANDIDATE, SignalLabel.STRONG_BUY_CANDIDATE}
                 and decision.stop_loss is not None
                 and decision.take_profit_1 is not None
-                and decision.take_profit_2 is not None
             ):
                 generated_signal_count += 1
                 pending = _PendingEntry(
@@ -489,12 +849,52 @@ def run_backtest(
                 )
             else:
                 no_trade_count += 1
+                decision_blockers.update(decision.blockers or ["score_below_candidate"])
+                blockers_by_regime[evaluation.regime.regime.value].update(
+                    decision.blockers or ["score_below_candidate"]
+                )
+        elif (
+            position is not None
+            and pending is None
+            and position.strategy_id == "bear_reversal_accumulation"
+            and position.entry_count < config.strategy.maximum_bear_entries
+            and replay_index < len(replay_positions) - 1
+        ):
+            evaluation = evaluate_setup_at_time(
+                prepared,
+                config,
+                requested_at=close_time.to_pydatetime(),
+                risk_state=risk_state,
+                data_is_complete=True,
+            )
+            decision = evaluation.decision
+            if (
+                decision.label in {SignalLabel.BUY_CANDIDATE, SignalLabel.STRONG_BUY_CANDIDATE}
+                and decision.strategy_id == "bear_reversal_accumulation"
+                and decision.strong_confirmation_count >= 1
+                and decision.planned_entry_price is not None
+                and decision.planned_entry_price >= position.entry_price
+                and decision.take_profit_1 is not None
+            ):
+                second_signal = replace(
+                    decision,
+                    stop_loss=position.stop_price,
+                    risk_multiplier=config.strategy.bear_first_risk_multiplier,
+                )
+                generated_signal_count += 1
+                pending = _PendingEntry(
+                    signal=second_signal,
+                    atr=float(evaluation.frames["4h"]["atr14"].iloc[-1]),
+                    created_index=index,
+                    regime=evaluation.trends["1d"],
+                    tranche_number=2,
+                )
 
     if position is not None:
         timestamp = pd.Timestamp(four_hour.index[replay_positions[-1]])
         row = four_hour.iloc[replay_positions[-1]]
         raw_exit = float(row["close"])
-        exit_price = raw_exit * (1 - config.backtest.slippage_rate)
+        exit_price = conservative_sell_fill(raw_exit, config.backtest.slippage_rate, trading_rules)
         proceeds = position.remaining_quantity * exit_price
         fee = proceeds * config.backtest.fee_rate
         slip = position.remaining_quantity * (raw_exit - exit_price)
@@ -509,7 +909,7 @@ def run_backtest(
                 position=position,
                 symbol=symbol,
                 timestamp=timestamp,
-                exit_reason="end_of_test",
+                exit_reason="forced_end_of_test",
                 rate=rate,
             )
         )
@@ -541,6 +941,18 @@ def run_backtest(
         )
         for trend in Trend
     }
+    regime_results = {
+        regime.value: _finite(
+            sum(trade.pnl for trade in trades if trade.market_regime_detail == regime) / initial_cny
+        )
+        for regime in MarketRegime
+    }
+    strategy_results = {
+        strategy_id: _finite(
+            sum(trade.pnl for trade in trades if trade.strategy_id == strategy_id) / initial_cny
+        )
+        for strategy_id in sorted({trade.strategy_id for trade in trades})
+    }
     insufficient_warning = (
         f"交易样本仅 {len(trades)} 笔，少于 {config.backtest.minimum_sample_trades} 笔；"
         "胜率、Sharpe、Sortino 等统计不宜用于证明策略有效。"
@@ -559,23 +971,39 @@ def run_backtest(
         end_time=equity_series.index[-1].to_pydatetime(),
         initial_capital_cny=initial_cny,
         final_equity_cny=float(equity_series.iloc[-1]),
+        account_currency=config.risk.account_currency,
         config={
-            "fee_rate": config.backtest.fee_rate,
-            "slippage_rate": config.backtest.slippage_rate,
-            "risk_per_trade": config.risk.risk_per_trade,
+            "market": config.market.model_dump(mode="json"),
+            "risk": config.risk.model_dump(mode="json"),
+            "strategy": config.strategy.model_dump(mode="json"),
+            "backtest": config.backtest.model_dump(mode="json"),
             "random_seed": config.strategy.random_seed,
             "parameter_optimization": False,
             "strategy_evaluator": "evaluate_setup_at_time",
             "timeframes": ["1d", "4h", "1h"],
         },
+        research_protocol=ResearchProtocol(
+            strategy_version=_package_version(),
+            parameter_set_id=_strategy_config_hash(config),
+        ),
         metrics=metrics,
-        time_splits=_time_split_results(equity_series, config),
+        chronological_holdout_split=_time_split_results(equity_series, config),
+        rolling_window_results=_rolling_window_results(equity_series),
         yearly_results={str(index.year): _finite(value) for index, value in yearly.items()},
         market_phase_results=phase_results,
+        market_regime_results=regime_results,
+        strategy_results=strategy_results,
+        benchmarks=_benchmarks(four_hour, replay_positions, config, trading_rules),
         generated_signal_count=generated_signal_count,
         executed_entry_count=executed_entry_count,
         cancelled_entry_count=cancelled_entry_count,
         cancelled_entry_reasons=dict(sorted(cancelled_reasons.items())),
+        signal_label_counts=dict(sorted(signal_labels.items())),
+        decision_blocker_counts=dict(sorted(decision_blockers.items())),
+        decision_blocker_counts_by_regime={
+            regime: dict(sorted(counts.items()))
+            for regime, counts in sorted(blockers_by_regime.items())
+        },
         cost_sensitivity={},
         insufficient_sample_warning=insufficient_warning,
         trades=trades,
@@ -583,7 +1011,12 @@ def run_backtest(
             "固定 BTC/ETH 样本不能代表全市场，仍存在样本选择限制。",
             "每次评估只纳入该时刻已经收盘的日线、4 小时线和 1 小时线。",
             "同一根 K 线同时触发止损和目标时按止损优先；入场 K 线不执行止盈。",
-            "60%/20%/20% 仅为固定时间切分，不是 walk-forward，且没有自动参数优化。",
+            "训练/验证/测试为预先声明的固定时间切分，不是 walk-forward，且没有自动参数优化。",
+            *(
+                ["集中度警告：最佳单笔交易贡献超过总净利润的 35%。"]
+                if metrics.best_trade_profit_contribution > 0.35
+                else []
+            ),
             *([insufficient_warning] if insufficient_warning else []),
         ],
     )

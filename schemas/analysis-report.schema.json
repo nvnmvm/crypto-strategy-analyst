@@ -182,6 +182,18 @@
       "title": "IndicatorSnapshot",
       "type": "object"
     },
+    "MarketRegime": {
+      "enum": [
+        "bull_trend",
+        "bull_pullback",
+        "sideways_range",
+        "bear_trend",
+        "bear_capitulation",
+        "bear_recovery"
+      ],
+      "title": "MarketRegime",
+      "type": "string"
+    },
     "PositionSuggestion": {
       "additionalProperties": false,
       "properties": {
@@ -403,6 +415,15 @@
       "title": "SignalLabel",
       "type": "string"
     },
+    "StrategyHorizon": {
+      "enum": [
+        "short_term",
+        "medium_term",
+        "long_term"
+      ],
+      "title": "StrategyHorizon",
+      "type": "string"
+    },
     "SymbolTradingRules": {
       "additionalProperties": false,
       "properties": {
@@ -478,7 +499,7 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "default": "1.2.0",
+      "default": "1.3.0",
       "title": "Schema Version",
       "type": "string"
     },
@@ -553,6 +574,15 @@
       "title": "Current Price",
       "type": "number"
     },
+    "account_currency": {
+      "default": "CNY",
+      "enum": [
+        "CNY",
+        "USDT"
+      ],
+      "title": "Account Currency",
+      "type": "string"
+    },
     "account_equity_cny": {
       "minimum": 0,
       "title": "Account Equity Cny",
@@ -580,7 +610,8 @@
     "trading_rules_status": {
       "enum": [
         "available",
-        "trading_rules_not_available"
+        "exchange_rules_unavailable",
+        "exchange_rules_stale_cache"
       ],
       "title": "Trading Rules Status",
       "type": "string"
@@ -600,6 +631,52 @@
     },
     "one_hour_trend": {
       "$ref": "#/$defs/Trend"
+    },
+    "market_regime": {
+      "$ref": "#/$defs/MarketRegime"
+    },
+    "regime_evidence": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Regime Evidence",
+      "type": "array"
+    },
+    "selected_strategy": {
+      "title": "Selected Strategy",
+      "type": "string"
+    },
+    "strategy_horizon": {
+      "$ref": "#/$defs/StrategyHorizon"
+    },
+    "entry_setup": {
+      "title": "Entry Setup",
+      "type": "string"
+    },
+    "candidate_tier": {
+      "enum": [
+        "A",
+        "B",
+        "none"
+      ],
+      "title": "Candidate Tier",
+      "type": "string"
+    },
+    "risk_multiplier": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Risk Multiplier",
+      "type": "number"
+    },
+    "confirmation_score": {
+      "minimum": 0,
+      "title": "Confirmation Score",
+      "type": "number"
+    },
+    "strong_confirmation_count": {
+      "minimum": 0,
+      "title": "Strong Confirmation Count",
+      "type": "integer"
     },
     "one_hour_confirmation": {
       "title": "One Hour Confirmation",
@@ -637,6 +714,45 @@
     },
     "score_breakdown": {
       "$ref": "#/$defs/ScoreBreakdown"
+    },
+    "support_zone": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PriceZone"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "default": "not_available",
+      "title": "Support Zone"
+    },
+    "allowed_entry_range": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PriceZone"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "default": "not_available",
+      "title": "Allowed Entry Range"
+    },
+    "planned_entry_price": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "const": "not_available",
+          "type": "string"
+        }
+      ],
+      "default": "not_available",
+      "title": "Planned Entry Price"
     },
     "entry_zone": {
       "anyOf": [
@@ -685,6 +801,13 @@
         }
       ],
       "title": "Take Profit 2"
+    },
+    "target_sources": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Target Sources",
+      "type": "array"
     },
     "trailing_stop_method": {
       "title": "Trailing Stop Method",
@@ -781,6 +904,15 @@
     "daily_trend",
     "four_hour_trend",
     "one_hour_trend",
+    "market_regime",
+    "regime_evidence",
+    "selected_strategy",
+    "strategy_horizon",
+    "entry_setup",
+    "candidate_tier",
+    "risk_multiplier",
+    "confirmation_score",
+    "strong_confirmation_count",
     "one_hour_confirmation",
     "support_zones",
     "resistance_zones",
@@ -792,6 +924,7 @@
     "stop_loss",
     "take_profit_1",
     "take_profit_2",
+    "target_sources",
     "trailing_stop_method",
     "risk_reward_ratio",
     "suggested_position_size",

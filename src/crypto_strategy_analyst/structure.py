@@ -25,17 +25,29 @@ def detect_confirmed_swings(
 ) -> list[SwingPoint]:
     """Return swings only after their right-side confirmation bars exist."""
 
+    if len(frame) < left + right + 1:
+        return []
+    highs = frame["high"]
+    lows = frame["low"]
+    high_mask = pd.Series(True, index=frame.index)
+    low_mask = pd.Series(True, index=frame.index)
+    for offset in range(-left, right + 1):
+        if offset == 0:
+            continue
+        high_mask &= highs > highs.shift(-offset)
+        low_mask &= lows < lows.shift(-offset)
+
     swings: list[SwingPoint] = []
-    for idx in range(left, len(frame) - right):
-        high_window = frame["high"].iloc[idx - left : idx + right + 1]
-        low_window = frame["low"].iloc[idx - left : idx + right + 1]
-        high = float(frame["high"].iloc[idx])
-        low = float(frame["low"].iloc[idx])
+    for idx in high_mask.to_numpy().nonzero()[0]:
         confirmed_at = pd.Timestamp(frame.index[idx + right])
-        if high == float(high_window.max()) and int((high_window == high).sum()) == 1:
-            swings.append(SwingPoint(pd.Timestamp(frame.index[idx]), high, "high", confirmed_at))
-        if low == float(low_window.min()) and int((low_window == low).sum()) == 1:
-            swings.append(SwingPoint(pd.Timestamp(frame.index[idx]), low, "low", confirmed_at))
+        swings.append(
+            SwingPoint(pd.Timestamp(frame.index[idx]), float(highs.iloc[idx]), "high", confirmed_at)
+        )
+    for idx in low_mask.to_numpy().nonzero()[0]:
+        confirmed_at = pd.Timestamp(frame.index[idx + right])
+        swings.append(
+            SwingPoint(pd.Timestamp(frame.index[idx]), float(lows.iloc[idx]), "low", confirmed_at)
+        )
     return sorted(swings, key=lambda point: point.timestamp)
 
 

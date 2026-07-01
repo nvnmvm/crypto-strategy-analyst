@@ -5,6 +5,6 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__ = version("crypto-strategy-analyst")
 except PackageNotFoundError:  # pragma: no cover - editable source without installation
-    __version__ = "0.1.2"
+    __version__ = "0.1.3"
 
 __all__ = ["__version__"]
