@@ -1,5 +1,6 @@
 profile: eth
 strategy:
-  entry_confidence: 68
-risk:
-  maximum_position_fraction: 0.28
+  candidate_confidence: 66
+horizons:
+  swing_risk: 0.007
+  long_risk: 0.006

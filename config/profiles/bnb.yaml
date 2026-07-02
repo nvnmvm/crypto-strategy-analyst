@@ -1,5 +1,7 @@
 profile: bnb
 strategy:
-  entry_confidence: 70
-risk:
-  maximum_position_fraction: 0.22
+  candidate_confidence: 66
+  volume_ratio: 1.20
+horizons:
+  short_risk: 0.004
+  swing_risk: 0.006

@@ -2,6 +2,24 @@
 
 All notable changes follow Keep a Changelog. Versions use Semantic Versioning.
 
+## [0.3.0] - Unreleased
+
+### Changed
+
+- Rebuilt the Skill as analysis-only with six public commands, schema 3.0 and strict next-bar historical replay.
+- Replaced placeholder strategy selection with six independent detectors, structural confirmations and explicit failure reasons.
+- Reworked Profiles into behavioral context, scoring, filtering, parameter and risk adjustments.
+
+### Added
+
+- Seven market regimes, multi-source key zones, near-level alerts, stable OpenClaw events and immutable entry validation.
+- Public derivatives, relative-strength and BTC-dominance sources plus caller-supplied external context.
+- Candidate diagnostics, attribution, ablation, frozen-parameter rolling validation, cost sensitivity, parameter stability and preregistered comparison.
+
+### Removed
+
+- Account, paper portfolio, journal and exchange-adapter functionality and their configuration surfaces.
+
 ## [0.2.0] - 2026-07-01
 
 ### Changed

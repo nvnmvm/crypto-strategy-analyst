@@ -1,5 +1,7 @@
 profile: btc
 strategy:
-  entry_confidence: 70
-risk:
-  maximum_position_fraction: 0.30
+  candidate_confidence: 67
+  entry_deviation_atr: 0.20
+horizons:
+  swing_risk: 0.008
+  long_risk: 0.007
