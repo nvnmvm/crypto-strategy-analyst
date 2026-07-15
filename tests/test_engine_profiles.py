@@ -7,6 +7,7 @@ from crypto_strategy_analyst.config import AppConfig
 from crypto_strategy_analyst.engine import analyze_snapshot
 from crypto_strategy_analyst.models import Availability, DataPoint, Horizon, SignalStatus
 from crypto_strategy_analyst.profiles.registry import get_profile, profile_for_symbol
+from crypto_strategy_analyst.structure import ChartPattern
 
 
 @pytest.mark.parametrize(
@@ -135,3 +136,26 @@ def test_one_hour_noise_cannot_reverse_long_regime(snapshot_factory):
         "bullish",
         "bull_pullback",
     }
+
+
+def test_confirmed_bearish_pattern_suppresses_long_candidates(snapshot_factory, monkeypatch):
+    pattern = ChartPattern(
+        name="double_top",
+        direction="bearish",
+        state="confirmed",
+        neckline=100,
+        invalidation=110,
+        measured_target=90,
+        completed_index=12,
+    )
+    monkeypatch.setattr(
+        "crypto_strategy_analyst.engine.detect_chart_patterns", lambda bars, indicator: [pattern]
+    )
+    report = analyze_snapshot(snapshot_factory(), AppConfig())
+    assert all(plan.status == SignalStatus.NO_TRADE for plan in report.horizons.values())
+    assert any(
+        event.event_type == "risk_alert"
+        and event.payload.get("action") == "suppress_long_candidate"
+        for event in report.events
+    )
+    assert report.market["chart_patterns"]["1d"][0]["name"] == "double_top"

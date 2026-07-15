@@ -1,11 +1,11 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from crypto_strategy_analyst.config import AppConfig
 from crypto_strategy_analyst.indicators import calculate_indicators, indicator_map
 from crypto_strategy_analyst.levels import detect_levels, merge_levels
-from crypto_strategy_analyst.models import Horizon, KeyLevel, MarketRegime
+from crypto_strategy_analyst.models import Candle, Horizon, IndicatorSet, KeyLevel, MarketRegime
 from crypto_strategy_analyst.strategies import StrategyContext, evaluate_strategies
 from crypto_strategy_analyst.strategies.bear_accumulation import detect as bear_accumulation
 from crypto_strategy_analyst.strategies.bear_reversal import detect as bear_reversal
@@ -13,6 +13,42 @@ from crypto_strategy_analyst.strategies.breakout_retest import detect as breakou
 from crypto_strategy_analyst.strategies.range_reversal import detect as range_reversal
 from crypto_strategy_analyst.strategies.support_rebound import detect as support_rebound
 from crypto_strategy_analyst.strategies.trend_pullback import detect as trend_pullback
+from crypto_strategy_analyst.structure import (
+    bullish_pattern_confirmations,
+    detect_chart_patterns,
+)
+
+
+def pattern_bars(prices: list[float]) -> list[Candle]:
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    return [
+        Candle(
+            open_time=start + timedelta(days=index),
+            close_time=start + timedelta(days=index + 1),
+            open=price,
+            high=price + 0.5,
+            low=price - 0.5,
+            close=price,
+            volume=100,
+        )
+        for index, price in enumerate(prices)
+    ]
+
+
+def pattern_indicator(atr: float = 2) -> IndicatorSet:
+    return IndicatorSet(
+        close=100,
+        ema20=100,
+        ema50=100,
+        ema200=100,
+        ema20_slope=0,
+        rsi=50,
+        macd_histogram=0,
+        atr=atr,
+        atr_percent=2,
+        volume_ratio=1,
+        trend_strength=50,
+    )
 
 
 def context(snapshot_factory, mode="bull", regime=MarketRegime.BULLISH, horizon=Horizon.SWING):
@@ -153,3 +189,24 @@ def test_indicator_ranges(snapshot_factory, period):
     result = calculate_indicators(snapshot_factory().candles["1d"], config)
     assert 0 <= result.rsi <= 100
     assert result.atr > 0
+
+
+@pytest.mark.parametrize(
+    ("prices", "expected"),
+    [
+        ([110, 108, 106, 101, 103, 106, 110, 108, 104, 101.3, 103, 108, 112, 116, 118], "double_bottom"),
+        ([100, 104, 108, 104, 100, 106, 114, 106, 101, 105, 108, 104, 98, 94, 92], "head_shoulders"),
+        ([110, 106, 102, 106, 110, 104, 96, 104, 109, 105, 102, 106, 112, 116], "inverse_head_shoulders"),
+        ([100, 104, 108, 104, 102, 104, 107, 105, 103, 104, 106, 105, 104, 104.5, 112, 115], "triangle_breakout"),
+    ],
+)
+def test_chart_patterns_require_and_recognize_closed_neckline_breaks(prices, expected):
+    patterns = {pattern.name: pattern for pattern in detect_chart_patterns(pattern_bars(prices), pattern_indicator())}
+    assert patterns[expected].state == "confirmed"
+
+
+def test_forming_pattern_is_not_a_structure_confirmation():
+    prices = [110, 108, 106, 101, 103, 106, 110, 108, 104, 101.3, 103, 108]
+    patterns = {pattern.name: pattern for pattern in detect_chart_patterns(pattern_bars(prices), pattern_indicator())}
+    assert patterns["double_bottom"].state == "forming"
+    assert bullish_pattern_confirmations(pattern_bars(prices), pattern_indicator()) == []

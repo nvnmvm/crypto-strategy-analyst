@@ -28,6 +28,7 @@ from .profiles.base import AssetProfile
 from .profiles.registry import get_profile
 from .regime import classify_regime
 from .strategies import StrategyContext, evaluate_strategies
+from .structure import ChartPattern, detect_chart_patterns
 
 HORIZON_FRAMES = {
     Horizon.SHORT: ("4h", "1h", "15m"),
@@ -151,6 +152,7 @@ def _plan(
     blocked: list[str],
     profile_adjustment: float,
     config: AppConfig,
+    chart_patterns: list[ChartPattern],
 ) -> HorizonPlan:
     frames = HORIZON_FRAMES[horizon]
     primary = frames[0]
@@ -180,9 +182,27 @@ def _plan(
     regime_minimum_r = _minimum_r(config, horizon) + (
         0.3 if regime in {MarketRegime.BEARISH, MarketRegime.CAPITULATION} else 0
     )
+    confirmed_bearish = [
+        pattern
+        for pattern in chart_patterns
+        if pattern.direction == "bearish" and pattern.state == "confirmed"
+    ]
+    forming_bearish = [
+        pattern
+        for pattern in chart_patterns
+        if pattern.direction == "bearish" and pattern.state == "forming"
+    ]
+    pattern_blockers = [f"confirmed_bearish_pattern:{pattern.name}" for pattern in confirmed_bearish]
+    pattern_observations = [
+        f"forming_bearish_pattern:{pattern.name}" for pattern in forming_bearish
+    ]
+    active_blockers = blocked + pattern_blockers
     confidence = float(
         np.clip(
-            score.confidence + REGIME_CONFIDENCE[regime] + profile_adjustment,
+            score.confidence
+            + REGIME_CONFIDENCE[regime]
+            + profile_adjustment
+            - 6 * len(forming_bearish),
             0,
             profile.confidence_cap,
         )
@@ -223,7 +243,7 @@ def _plan(
         and level.strength >= 45
     ]
     risk_fraction = _base_risk(config, horizon) * risk_multiplier
-    if blocked:
+    if active_blockers:
         status = SignalStatus.NO_TRADE
     elif matches and confidence >= config.strategy.candidate_confidence:
         status = SignalStatus.CANDIDATE
@@ -255,7 +275,7 @@ def _plan(
         else None,
         structure_confirmations=selected.structure_confirmations if selected else [],
         secondary_confirmations=selected.secondary_confirmations if selected else [],
-        failed_conditions=blocked
+        failed_conditions=active_blockers
         + (
             []
             if selected
@@ -264,9 +284,13 @@ def _plan(
         invalidation_conditions=selected.invalidation_conditions if selected else [],
         confidence=confidence,
         risk_suggestion=RiskSuggestion(
-            level="none" if blocked else "reduced" if risk_multiplier < 0.75 else "normal",
-            risk_fraction=0 if blocked else risk_fraction,
-            rationale=risk_reasons + blocked,
+            level="none"
+            if active_blockers
+            else "reduced"
+            if risk_multiplier < 0.75 or pattern_observations
+            else "normal",
+            risk_fraction=0 if active_blockers else risk_fraction,
+            rationale=risk_reasons + active_blockers + pattern_observations,
         ),
         strategy_results=results,
     )
@@ -307,7 +331,7 @@ def _availability(snapshot: MarketSnapshot, completed) -> dict[str, DataPoint]:
     return availability
 
 
-def _events(snapshot, profile, plans, score, required, hard_filters):
+def _events(snapshot, profile, plans, score, required, hard_filters, chart_patterns):
     events = []
     for horizon, plan in plans.items():
         if plan.status == SignalStatus.NEAR_KEY_LEVEL and plan.key_levels:
@@ -371,6 +395,25 @@ def _events(snapshot, profile, plans, score, required, hard_filters):
                 "critical",
             )
         )
+    for timeframe, patterns in chart_patterns.items():
+        for pattern in patterns:
+            if pattern.direction == "bearish" and pattern.state == "confirmed":
+                events.append(
+                    make_event(
+                        "risk_alert",
+                        snapshot.symbol,
+                        profile.name,
+                        None,
+                        snapshot.as_of,
+                        f"confirmed_bearish_pattern:{timeframe}:{pattern.name}",
+                        {
+                            "timeframe": timeframe,
+                            "pattern": pattern.as_dict(),
+                            "action": "suppress_long_candidate",
+                        },
+                        "warning",
+                    )
+                )
     if profile.name == "generic":
         events.append(
             make_event(
@@ -425,6 +468,7 @@ def _assemble_report(
     required,
     hard_filters,
     report_id,
+    chart_patterns,
 ) -> AnalysisReport:
     primary_regime = plans[Horizon.SWING].market_regime
     return AnalysisReport(
@@ -442,6 +486,10 @@ def _assemble_report(
             "liquidity": snapshot.auxiliary.get(
                 "liquidity", DataPoint(status=Availability.NOT_AVAILABLE, source="not_available")
             ).model_dump(mode="json"),
+            "chart_patterns": {
+                timeframe: [pattern.as_dict() for pattern in patterns]
+                for timeframe, patterns in chart_patterns.items()
+            },
         },
         data_availability=availability,
         scores=score,
@@ -474,6 +522,10 @@ def evaluate_setup_at_time(
     profile = get_profile(profile_name, snapshot.symbol)
     completed = {timeframe: snapshot.completed(timeframe) for timeframe in snapshot.candles}
     indicators = indicator_map(completed, config.indicators)
+    chart_patterns = {
+        timeframe: detect_chart_patterns(completed[timeframe], indicator)
+        for timeframe, indicator in indicators.items()
+    }
     levels = (
         detect_levels(completed, indicators, snapshot.price, config.levels) if indicators else []
     )
@@ -500,12 +552,13 @@ def evaluate_setup_at_time(
             required + hard_filters,
             evaluations[horizon].confidence_adjustment,
             config,
+            chart_patterns.get(HORIZON_FRAMES[horizon][0], []),
         )
         for horizon in Horizon
     }
     warnings = sorted({warning for value in evaluations.values() for warning in value.warnings})
     availability = _availability(snapshot, completed)
-    events = _events(snapshot, profile, plans, score, required, hard_filters)
+    events = _events(snapshot, profile, plans, score, required, hard_filters, chart_patterns)
     return _assemble_report(
         snapshot,
         profile,
@@ -519,6 +572,7 @@ def evaluate_setup_at_time(
         required,
         hard_filters,
         _report_id(snapshot, completed),
+        chart_patterns,
     )
 
 

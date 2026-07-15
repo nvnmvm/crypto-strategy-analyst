@@ -17,6 +17,7 @@ OpenClaw owns symbol selection, scheduling, alert deduplication, follow-up timin
 4. Call the shared `evaluate_setup_at_time` path for current and historical analysis. Never expose a candle closed after the evaluation time.
 5. Keep short, swing and long plans independent. A strategy name may appear only when its detector actually matches.
 6. Require at least one structural confirmation. RSI, funding, flows or chain activity are secondary evidence only.
+   Double bottoms, inverse head-and-shoulders, their bearish counterparts and compressed-triangle breakouts are deterministic swing/ATR patterns: require a completed neckline/boundary break, never promote a forming pattern to a candidate, and treat confirmed bearish patterns as a long-risk filter rather than a short order.
 7. Respect structural stops, resistance-aware targets and the configured minimum reward/risk. Downgrade insufficient space to `watch`.
 8. Return schema 3.0 JSON or concise Chinese Markdown, including data availability, scores, levels, horizon plans, warnings, limitations and OpenClaw events.
 

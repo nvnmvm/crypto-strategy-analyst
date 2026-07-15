@@ -12,6 +12,14 @@ def report_json(report: AnalysisReport) -> str:
 
 
 def report_markdown(report: AnalysisReport) -> str:
+    pattern_names = {
+        "double_bottom": "双底",
+        "double_top": "双顶",
+        "inverse_head_shoulders": "倒头肩底",
+        "head_shoulders": "头肩顶",
+        "triangle_breakout": "收敛三角突破",
+    }
+    pattern_states = {"forming": "形成中", "confirmed": "已确认", "invalidated": "已失效"}
     lines = [
         f"# {report.symbol} 盘面分析",
         "",
@@ -35,6 +43,17 @@ def report_markdown(report: AnalysisReport) -> str:
                 else "暂无可靠点位"
             )
         )
+    lines += ["", "## 结构形态", ""]
+    chart_patterns = report.market.get("chart_patterns", {})
+    rendered_patterns = []
+    for timeframe, patterns in chart_patterns.items():
+        for pattern in patterns:
+            rendered_patterns.append(
+                f"- {timeframe}：{pattern_names.get(pattern['name'], pattern['name'])}"
+                f"（{pattern_states.get(pattern['state'], pattern['state'])}）；"
+                f"颈线：{pattern['neckline']:.8g}；失效：{pattern['invalidation']:.8g}。"
+            )
+    lines += rendered_patterns or ["未发现满足 ATR 尺寸与颈线规则的已确认形态。"]
     lines += ["", "## 接近提醒", ""]
     near_events = [event for event in report.events if event.event_type == "near_key_level"]
     lines += [f"- {event.horizon.value}：{event.payload}" for event in near_events] or [
