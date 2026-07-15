@@ -1,10 +1,12 @@
 from datetime import timedelta
+from types import SimpleNamespace
 
 from crypto_strategy_analyst import backtest as backtest_module
 from crypto_strategy_analyst.backtest import _simulate_trade, run_backtest, snapshot_at
 from crypto_strategy_analyst.config import AppConfig
 from crypto_strategy_analyst.engine import analyze_snapshot
 from crypto_strategy_analyst.models import (
+    BacktestTrade,
     Horizon,
     MarketRegime,
     PriceRange,
@@ -51,6 +53,13 @@ def test_snapshot_at_excludes_future(snapshot_factory):
     view = snapshot_at(snapshot, snapshot.as_of)
     assert all(bar.close_time <= snapshot.as_of for bars in view.candles.values() for bar in bars)
     assert view.price < 10_000
+
+
+def test_snapshot_at_applies_live_history_limit_without_future_bars(snapshot_factory):
+    snapshot = snapshot_factory(count=30)
+    view = snapshot_at(snapshot, snapshot.as_of, history_limit=12)
+    assert {len(bars) for bars in view.candles.values()} == {12}
+    assert all(bar.close_time <= snapshot.as_of for bars in view.candles.values() for bar in bars)
 
 
 def test_same_bar_stop_and_target_uses_stop_first(snapshot_factory):
@@ -103,6 +112,63 @@ def test_backtest_calls_shared_replay_engine(snapshot_factory, monkeypatch):
     assert calls == len(snapshot.candles["4h"]) - 2
     assert result.assumptions["execution"] == "next_primary_bar_open"
     assert result.assumptions["intrabar_order"] == "stop_first"
+
+
+def test_backtest_sizes_multi_horizon_candidates_in_chronological_order(
+    snapshot_factory, monkeypatch
+):
+    """Horizon loop order must not let a later result change earlier capital."""
+
+    snapshot = snapshot_factory(count=4)
+    base_plan = candidate_plan(snapshot_factory)
+
+    def fake_replay(_snapshot, _at, _config, _profile, _close_time_index):
+        return SimpleNamespace(
+            profile="test",
+            horizons={
+                Horizon.SHORT: base_plan.model_copy(update={"horizon": Horizon.SHORT}),
+                Horizon.LONG: base_plan.model_copy(update={"horizon": Horizon.LONG}),
+            },
+        )
+
+    monkeypatch.setattr(backtest_module, "replay_signal", fake_replay)
+    monkeypatch.setattr(
+        backtest_module,
+        "validate_entry",
+        lambda *_args, **_kwargs: SimpleNamespace(status=SignalStatus.ENTRY_VALIDATED),
+    )
+    seen: list[tuple] = []
+
+    def immediate_exit(bars, start_index, plan, symbol, equity, _config, profile):
+        bar = bars[start_index]
+        seen.append((bar.open_time, equity))
+        return BacktestTrade(
+            symbol=symbol,
+            profile=profile,
+            horizon=plan.horizon,
+            strategy=plan.strategy,
+            regime=plan.market_regime,
+            planned_at=plan.valid_from,
+            entry_time=bar.open_time,
+            exit_time=bar.open_time,
+            entry_price=bar.open,
+            exit_price=bar.open,
+            quantity=1,
+            pnl=10,
+            return_fraction=10 / equity,
+            r_multiple=1,
+            confidence=plan.confidence,
+            fees=0,
+            holding_hours=0,
+            mfe=0,
+            mae=0,
+            exit_reason="test",
+        )
+
+    monkeypatch.setattr(backtest_module, "_simulate_trade", immediate_exit)
+    run_backtest(snapshot, AppConfig(), horizons=[Horizon.SHORT, Horizon.LONG])
+    assert [entry for entry, _equity in seen] == sorted(entry for entry, _equity in seen)
+    assert [equity for _entry, equity in seen] == [600 + 10 * index for index in range(len(seen))]
 
 
 def test_time_splits_are_named_dates(snapshot_factory):

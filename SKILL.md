@@ -28,6 +28,7 @@ crypto-strategy-analyst analyze BTC/USDT --horizons short swing long --format js
 crypto-strategy-analyst compare BTC/USDT ETH/USDT SOL/USDT
 crypto-strategy-analyst validate-entry ./outputs/BTC-USDT-report.json --dataset ./data/BTC-USDT --horizon swing
 crypto-strategy-analyst fetch-dataset BTC/USDT ./data/BTC-USDT
+crypto-strategy-analyst fetch-dataset BTC/USDT ./data/BTC-USDT-full --start 2017-08-01
 crypto-strategy-analyst backtest ./data/BTC-USDT
 crypto-strategy-analyst research diagnose ./data/BTC-USDT
 ```

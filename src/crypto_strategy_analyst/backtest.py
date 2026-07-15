@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -19,11 +21,41 @@ from .models import (
 )
 from .validation import PRIMARY, validate_entry
 
+_HORIZON_TIE_BREAK = {Horizon.SWING: 0, Horizon.LONG: 1, Horizon.SHORT: 2}
 
-def snapshot_at(snapshot: MarketSnapshot, at: datetime) -> MarketSnapshot:
+
+@dataclass(frozen=True)
+class _ValidatedCandidate:
+    """A signal that passed next-bar validation but has not yet consumed capital."""
+
+    entry_time: datetime
+    horizon: Horizon
+    source_index: int
+    bars: list
+    plan: object
+    profile: str
+
+
+def snapshot_at(
+    snapshot: MarketSnapshot,
+    at: datetime,
+    history_limit: int | None = None,
+    close_time_index: dict[str, list[datetime]] | None = None,
+) -> MarketSnapshot:
     candles = {
-        frame: [bar for bar in bars if bar.close_time <= at]
+        frame: (
+            bars[
+                max(0, end - history_limit) : end
+            ]
+            if history_limit
+            else bars[:end]
+        )
         for frame, bars in snapshot.candles.items()
+        for end in [
+            bisect_right(close_time_index[frame], at)
+            if close_time_index is not None
+            else sum(bar.close_time <= at for bar in bars)
+        ]
     }
     decision = candles.get("4h", []) or candles.get("1d", [])
     auxiliary = {
@@ -50,8 +82,19 @@ def snapshot_at(snapshot: MarketSnapshot, at: datetime) -> MarketSnapshot:
     )
 
 
-def replay_signal(snapshot: MarketSnapshot, at: datetime, config: AppConfig, profile: str = "auto"):
-    return evaluate_setup_at_time(snapshot_at(snapshot, at), config, profile)
+def replay_signal(
+    snapshot: MarketSnapshot,
+    at: datetime,
+    config: AppConfig,
+    profile: str = "auto",
+    close_time_index: dict[str, list[datetime]] | None = None,
+):
+    # Live acquisition defaults to ``data.history_limit`` per timeframe.  Replay
+    # the same bounded history, rather than granting the historical evaluator an
+    # unbounded indicator warm-up that a live call would not have received.
+    return evaluate_setup_at_time(
+        snapshot_at(snapshot, at, config.data.history_limit, close_time_index), config, profile
+    )
 
 
 def _validation_snapshot(snapshot: MarketSnapshot, at: datetime) -> MarketSnapshot:
@@ -276,16 +319,25 @@ def run_backtest(
     horizons: list[Horizon] | None = None,
 ) -> BacktestResult:
     selected = horizons or list(Horizon)
-    equity = config.research.starting_equity
     trades: list[BacktestTrade] = []
-    funnel = Counter({"evaluations": 0, "candidates": 0, "validated": 0, "cancelled": 0})
+    funnel = Counter(
+        {"evaluations": 0, "candidates": 0, "validated": 0, "cancelled": 0, "overlap_skipped": 0}
+    )
     blockers: Counter[str] = Counter()
     cancellations: Counter[str] = Counter()
+    candidates: list[_ValidatedCandidate] = []
+    close_time_index = {
+        timeframe: [bar.close_time for bar in bars] for timeframe, bars in snapshot.candles.items()
+    }
+    evaluation_events: dict[datetime, list[tuple[Horizon, list, int]]] = {}
     for horizon in selected:
         bars = snapshot.candles.get(PRIMARY[horizon], [])
         for index in range(1, len(bars) - 1):
             at = bars[index].close_time
-            report = replay_signal(snapshot, at, config, profile)
+            evaluation_events.setdefault(at, []).append((horizon, bars, index))
+    for at, events in sorted(evaluation_events.items()):
+        report = replay_signal(snapshot, at, config, profile, close_time_index)
+        for horizon, bars, index in events:
             plan = report.horizons[horizon]
             funnel["evaluations"] += 1
             if plan.status != SignalStatus.CANDIDATE:
@@ -300,12 +352,48 @@ def run_backtest(
                 cancellations.update(validation.reasons)
                 continue
             funnel["validated"] += 1
-            trade = _simulate_trade(
-                bars, index + 1, plan, snapshot.symbol, equity, config, report.profile
+            candidates.append(
+                _ValidatedCandidate(
+                    entry_time=next_bar.open_time,
+                    horizon=horizon,
+                    source_index=index + 1,
+                    bars=bars,
+                    plan=plan,
+                    profile=report.profile,
+                )
             )
-            trades.append(trade)
-            equity += trade.pnl
-    trades.sort(key=lambda trade: trade.entry_time)
+    # The earlier implementation sized each horizon in its own loop then sorted
+    # the completed trades.  That allowed a future short-horizon result to alter
+    # capital used by an earlier long-horizon entry.  Build the complete event
+    # queue first, then consume one cash account in chronological order.
+    candidates.sort(
+        key=lambda item: (
+            item.entry_time,
+            -item.plan.confidence,
+            -item.plan.minimum_reward_risk,
+            _HORIZON_TIE_BREAK[item.horizon],
+            item.source_index,
+        )
+    )
+    equity = config.research.starting_equity
+    occupied_until: datetime | None = None
+    for candidate in candidates:
+        if occupied_until and candidate.entry_time < occupied_until:
+            funnel["overlap_skipped"] += 1
+            cancellations.update(["overlapping_position"])
+            continue
+        trade = _simulate_trade(
+            candidate.bars,
+            candidate.source_index,
+            candidate.plan,
+            snapshot.symbol,
+            equity,
+            config,
+            candidate.profile,
+        )
+        trades.append(trade)
+        equity += trade.pnl
+        occupied_until = trade.exit_time
     rolling = []
     if trades:
         start = trades[0].entry_time

@@ -74,6 +74,27 @@ def test_binance_market_source():
     assert len(snapshot.candles["1h"]) == 25
 
 
+def test_binance_history_paginates_from_start_time():
+    rows = kline_rows(1001)
+    for row in rows:
+        row[2] = "2000"
+    requested_starts: list[int] = []
+
+    def router(url, params):
+        if "klines" in url:
+            requested_starts.append(params["startTime"])
+            return Response(rows[:1000] if params["startTime"] <= rows[0][0] else rows[1000:])
+        if "ticker/price" in url:
+            return Response({"price": "125"})
+        return Response({"symbols": [{"symbol": "BTCUSDT"}]})
+
+    start = datetime.fromtimestamp(rows[0][0] / 1000, UTC)
+    end = datetime.fromtimestamp((rows[-1][6] + 1) / 1000, UTC)
+    snapshot = BinanceMarketData(client=Client(router)).history("BTC/USDT", ["1h"], start, end)
+    assert len(snapshot.candles["1h"]) == 1001
+    assert requested_starts == [rows[0][0], rows[1000][0]]
+
+
 def test_derivatives_success_and_failure():
     success = BinanceDerivativesData(
         client=Client(

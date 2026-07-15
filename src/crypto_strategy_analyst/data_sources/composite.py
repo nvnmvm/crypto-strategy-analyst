@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from ..models import DataPoint, MarketSnapshot
@@ -34,6 +35,22 @@ class CompositeDataSource(MarketDataSource):
 
     def snapshot(self, symbol: str, timeframes: list[str], limit: int = 500) -> MarketSnapshot:
         snapshot = self.market.snapshot(symbol, timeframes, limit)
+        return self._with_auxiliary(snapshot, symbol)
+
+    def history(
+        self,
+        symbol: str,
+        timeframes: list[str],
+        start_at: datetime,
+        end_at: datetime | None = None,
+    ) -> MarketSnapshot:
+        if not isinstance(self.market, BinanceMarketData):
+            raise ValueError("ranged history requires the built-in Binance public market source")
+        return self._with_auxiliary(
+            self.market.history(symbol, timeframes, start_at, end_at), symbol
+        )
+
+    def _with_auxiliary(self, snapshot: MarketSnapshot, symbol: str) -> MarketSnapshot:
         values: dict[str, DataPoint] = {}
         for source in self.auxiliary:
             values.update(source.fetch(symbol))

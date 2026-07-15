@@ -29,6 +29,7 @@ crypto-strategy-analyst analyze BTC/USDT --profile auto --horizons short swing l
 crypto-strategy-analyst compare BTC/USDT ETH/USDT BNB/USDT SOL/USDT
 crypto-strategy-analyst validate-entry outputs/BTC-USDT-report.json --dataset data/BTC-USDT --horizon swing
 crypto-strategy-analyst fetch-dataset BTC/USDT data/BTC-USDT
+crypto-strategy-analyst fetch-dataset BTC/USDT data/BTC-USDT-full --start 2017-08-01
 crypto-strategy-analyst backtest data/BTC-USDT --horizons short swing long
 crypto-strategy-analyst research diagnose data/BTC-USDT
 ```
@@ -39,6 +40,8 @@ crypto-strategy-analyst research diagnose data/BTC-USDT
 
 - 实时分析和回测共用 `evaluate_setup_at_time`。
 - 历史评估只读取当时已经收盘的 K 线；候选只在下一根计划周期 K 线开盘验证。
+- `fetch-dataset --start` 按 Binance 的公开 K 线分页从指定 UTC 日期开始下载；回放窗口仍使用与实时获取一致的每周期 `history_limit`，避免历史评估获得实时调用看不到的额外数据。
+- 多周期候选先统一按入场时间排序，再使用一个不重叠的现金账户依次定仓；不同周期的循环顺序不会影响较早交易的权益。
 - 六种策略独立检测并保留失败原因，不再选择“第一个已启用策略”。
 - 候选必须有结构确认，辅助指标不能单独触发信号。
 - 双顶、双底、头肩顶、倒头肩底和收敛三角突破由已收盘 K 线与 ATR 尺寸规则识别；只有颈线或边界有效突破才是确认，形成中的形态只作观察。已确认的看空形态会抑制多头候选，不会自动产生做空指令。

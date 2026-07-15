@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("symbol")
     fetch.add_argument("output")
     fetch.add_argument("--limit", type=int, default=500)
+    fetch.add_argument("--start", help="UTC history start (YYYY-MM-DD or ISO-8601)")
+    fetch.add_argument("--end", help="UTC history end (YYYY-MM-DD or ISO-8601)")
     fetch.add_argument("--include-15m", action="store_true")
     fetch.add_argument("--external-data")
     fetch.add_argument("--config")
@@ -117,6 +120,13 @@ def _config(args, symbol: str):
 
 def _emit(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+
+
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _save_report(report: AnalysisReport, output_dir: str | None, format_name: str) -> None:
@@ -220,8 +230,16 @@ def main(argv: list[str] | None = None) -> int:
         frames = list(config.data.timeframes) + (
             ["15m"] if args.include_15m and "15m" not in config.data.timeframes else []
         )
-        snapshot = CompositeDataSource(timeout=config.data.request_timeout_seconds).snapshot(
-            args.symbol, frames, args.limit
+        source = CompositeDataSource(timeout=config.data.request_timeout_seconds)
+        snapshot = (
+            source.history(
+                args.symbol,
+                frames,
+                _parse_utc(args.start),
+                _parse_utc(args.end) if args.end else None,
+            )
+            if args.start
+            else source.snapshot(args.symbol, frames, args.limit)
         )
         if args.external_data:
             snapshot = snapshot.model_copy(
