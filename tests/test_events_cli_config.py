@@ -48,6 +48,13 @@ def test_layered_config_and_extra_rejected(tmp_path: Path):
         AppConfig.model_validate({"trading": {"enabled": True}})
 
 
+def test_btc_profile_disables_insufficient_support_rebound_sample():
+    config = load_config(profile="btc")
+    assert config.strategy.trend_pullback is True
+    assert config.strategy.breakout_retest is True
+    assert config.strategy.support_rebound is False
+
+
 def test_event_dedup_is_stable_and_level_specific():
     first = stable_key("near_key_level", "BTC/USDT", "btc", Horizon.SWING, "support:100")
     second = stable_key("near_key_level", "BTC/USDT", "btc", Horizon.SWING, "support:100")

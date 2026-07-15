@@ -1,5 +1,9 @@
 profile: btc
 strategy:
+  # BTC/USDT 2017-2021 training replay: this family produced only two
+  # cost-negative samples, so leave it disabled pending more evidence. Other
+  # asset profiles retain their independent strategy sets.
+  support_rebound: false
   candidate_confidence: 67
   entry_deviation_atr: 0.20
 horizons:
