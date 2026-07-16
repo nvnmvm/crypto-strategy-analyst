@@ -1,23 +1,33 @@
-"""Compact OpenClaw-facing command line interface."""
+"""Six-command OpenClaw analysis CLI."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .backtest import run_backtest
 from .config import load_config
-from .data_sources import BinancePublicData
+from .data_sources import BinanceMarketData, CompositeDataSource
+from .data_sources.composite import load_external_context
+from .dataset import load_dataset, save_dataset
 from .engine import analyze_snapshot
-from .exchange import BinanceAdapter
-from .journal import add_entry, read_entries
-from .models import MarketSnapshot, OrderDraft
-from .portfolio import PaperBroker
+from .models import AnalysisReport, Horizon
 from .profiles.registry import profile_for_symbol
 from .rendering import report_json, report_markdown
+from .research import (
+    ablation,
+    attribution,
+    compare,
+    cost_sensitivity,
+    diagnose,
+    parameter_stability,
+    walk_forward,
+)
+from .technical_snapshot import analyze_technical_snapshot, technical_json, technical_markdown
+from .validation import validate_entry
 
 TOP_LEVEL_COMMANDS = (
     "analyze",
@@ -26,46 +36,71 @@ TOP_LEVEL_COMMANDS = (
     "fetch-dataset",
     "backtest",
     "research",
-    "portfolio",
-    "journal",
-    "exchange",
 )
 
 
-def _base_parser(name: str, subparsers: Any) -> argparse.ArgumentParser:
-    parser = subparsers.add_parser(name)
+def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config")
-    return parser
+    parser.add_argument("--profile", default="auto")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="crypto-strategy-analyst")
-    subs = parser.add_subparsers(dest="command", required=True)
-    analyze = _base_parser("analyze", subs)
-    analyze.add_argument("symbol")
-    analyze.add_argument("--profile", default="auto")
+    commands = parser.add_subparsers(dest="command", required=True)
+    analyze = commands.add_parser("analyze")
+    _common(analyze)
+    analyze.add_argument("symbol", nargs="?")
+    analyze.add_argument("--symbol", dest="symbol_option")
+    analyze.add_argument(
+        "--horizons",
+        nargs="+",
+        choices=[item.value for item in Horizon],
+        default=[item.value for item in Horizon],
+    )
     analyze.add_argument("--dataset")
+    analyze.add_argument("--external-data")
+    analyze.add_argument("--output-dir")
     analyze.add_argument("--format", choices=("json", "markdown"), default="json")
+    analyze.add_argument(
+        "--technical-only",
+        action="store_true",
+        help="return compact EMA/MA/RSI/MACD/ATR analysis without patterns, levels, or auxiliary data",
+    )
 
-    compare = _base_parser("compare", subs)
-    compare.add_argument("symbols", nargs="+")
-    compare.add_argument("--profile", default="auto")
+    compare_parser = commands.add_parser("compare")
+    _common(compare_parser)
+    compare_parser.add_argument("symbols", nargs="+")
+    compare_parser.add_argument("--format", choices=("json", "markdown"), default="json")
 
-    validate = _base_parser("validate-entry", subs)
+    validate = commands.add_parser("validate-entry")
     validate.add_argument("report")
-    validate.add_argument("--horizon", choices=("short", "swing", "long"), default="swing")
+    validate.add_argument("--dataset")
+    validate.add_argument("--horizon", choices=[item.value for item in Horizon], default="swing")
+    validate.add_argument("--config")
 
-    fetch = _base_parser("fetch-dataset", subs)
+    fetch = commands.add_parser("fetch-dataset")
     fetch.add_argument("symbol")
     fetch.add_argument("output")
     fetch.add_argument("--limit", type=int, default=500)
+    fetch.add_argument("--start", help="UTC history start (YYYY-MM-DD or ISO-8601)")
+    fetch.add_argument("--end", help="UTC history end (YYYY-MM-DD or ISO-8601)")
     fetch.add_argument("--include-15m", action="store_true")
+    fetch.add_argument("--external-data")
+    fetch.add_argument("--config")
 
-    backtest = _base_parser("backtest", subs)
+    backtest = commands.add_parser("backtest")
+    _common(backtest)
     backtest.add_argument("dataset")
-    backtest.add_argument("--profile", default="auto")
+    backtest.add_argument(
+        "--horizons",
+        nargs="+",
+        choices=[item.value for item in Horizon],
+        default=[item.value for item in Horizon],
+    )
+    backtest.add_argument("--output-dir")
 
-    research = _base_parser("research", subs)
+    research = commands.add_parser("research")
+    _common(research)
     research_sub = research.add_subparsers(dest="research_command", required=True)
     for name in (
         "diagnose",
@@ -76,161 +111,199 @@ def build_parser() -> argparse.ArgumentParser:
         "parameter-stability",
         "compare",
     ):
-        research_sub.add_parser(name)
-
-    portfolio = _base_parser("portfolio", subs)
-    portfolio_sub = portfolio.add_subparsers(dest="portfolio_command", required=True)
-    portfolio_sub.add_parser("show")
-    trade = portfolio_sub.add_parser("trade")
-    trade.add_argument("symbol")
-    trade.add_argument("side", choices=("buy", "sell"))
-    trade.add_argument("quantity", type=float)
-    trade.add_argument("price", type=float)
-
-    journal = _base_parser("journal", subs)
-    journal_sub = journal.add_subparsers(dest="journal_command", required=True)
-    journal_sub.add_parser("list")
-    journal_sub.add_parser("compare")
-    journal_add = journal_sub.add_parser("add")
-    journal_add.add_argument("record", help="JSON object")
-
-    exchange = _base_parser("exchange", subs)
-    exchange_sub = exchange.add_subparsers(dest="exchange_command", required=True)
-    draft = exchange_sub.add_parser("draft")
-    draft.add_argument("symbol")
-    draft.add_argument("side", choices=("BUY", "SELL"))
-    draft.add_argument("quantity", type=float)
-    draft.add_argument("reference_price", type=float)
-    place = exchange_sub.add_parser("place")
-    place.add_argument("draft")
-    place.add_argument("confirmation_token")
-    status = exchange_sub.add_parser("status")
-    status.add_argument("symbol")
-    status.add_argument("client_order_id")
+        child = research_sub.add_parser(name)
+        child.add_argument("dataset")
     return parser
 
 
-def _load_snapshot(path: str) -> MarketSnapshot:
-    return MarketSnapshot.model_validate_json(Path(path).read_text(encoding="utf-8"))
+def _profile_name(requested: str, symbol: str) -> str:
+    return profile_for_symbol(symbol).name if requested == "auto" else requested
 
 
-def _snapshot(symbol: str, dataset: str | None, config: Any) -> MarketSnapshot:
-    return (
-        _load_snapshot(dataset)
-        if dataset
-        else BinancePublicData().snapshot(symbol, config.data.timeframes, config.data.history_limit)
-    )
+def _config(args, symbol: str):
+    return load_config(args.config, _profile_name(getattr(args, "profile", "auto"), symbol))
 
 
 def _emit(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
 
 
-def main(argv: list[str] | None = None) -> int:
-    raw_args = list(argv) if argv is not None else sys.argv[1:]
-    if raw_args and raw_args[0] == "risk":
-        print("The v0.1.x risk command was removed; use portfolio or journal in v0.2.0.")
-        return 0
-    args = build_parser().parse_args(raw_args)
-    profile = getattr(args, "profile", "generic")
-    config_profile = profile
-    if profile == "auto":
-        if args.command == "backtest":
-            config_profile = profile_for_symbol(_load_snapshot(args.dataset).symbol).name
-        elif hasattr(args, "symbol"):
-            config_profile = profile_for_symbol(args.symbol).name
-        else:
-            config_profile = "generic"
-    config = load_config(args.config, config_profile)
-    if args.command == "fetch-dataset":
-        frames = ["1w", "1d", "4h", "1h"] + (["15m"] if args.include_15m else [])
-        snapshot = BinancePublicData().snapshot(args.symbol, frames, args.limit)
-        Path(args.output).write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
-        _emit({"saved": args.output, "symbol": snapshot.symbol})
-    elif args.command == "analyze":
-        report = analyze_snapshot(
-            _snapshot(args.symbol, args.dataset, config), config, args.profile
+def _parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _save_report(report: AnalysisReport, output_dir: str | None, format_name: str) -> None:
+    if not output_dir:
+        return
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    safe = report.symbol.replace("/", "-")
+    suffix = "json" if format_name == "json" else "md"
+    content = report_json(report) if format_name == "json" else report_markdown(report)
+    (target / f"{safe}-report.{suffix}").write_text(content, encoding="utf-8")
+
+
+def _live_or_dataset(
+    symbol: str,
+    dataset: str | None,
+    config,
+    external: str | None = None,
+    technical_only: bool = False,
+):
+    if config.data.exchange != "binance":
+        raise ValueError("only the Binance public market source is implemented")
+    snapshot = (
+        load_dataset(dataset)
+        if dataset
+        else (
+            BinanceMarketData(timeout=config.data.request_timeout_seconds).indicator_snapshot(
+                symbol, config.data.timeframes, config.data.history_limit
+            )
+            if technical_only
+            else CompositeDataSource(timeout=config.data.request_timeout_seconds).snapshot(
+                symbol, config.data.timeframes, config.data.history_limit
+            )
         )
-        print(report_markdown(report) if args.format == "markdown" else report_json(report))
+    )
+    if external:
+        snapshot = snapshot.model_copy(
+            update={"auxiliary": {**snapshot.auxiliary, **load_external_context(external)}}
+        )
+    return snapshot
+
+
+def _save_technical_report(
+    report: dict[str, Any], output_dir: str | None, format_name: str
+) -> None:
+    if not output_dir:
+        return
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    safe = report["symbol"].replace("/", "-")
+    suffix = "json" if format_name == "json" else "md"
+    content = technical_json(report) if format_name == "json" else technical_markdown(report)
+    (target / f"{safe}-technical.{suffix}").write_text(content, encoding="utf-8")
+
+
+def _run_research(command: str, snapshot, config, profile: str):
+    result = run_backtest(snapshot, config, profile)
+    functions = {
+        "diagnose": lambda: diagnose(result),
+        "attribution": lambda: attribution(result),
+        "ablation": lambda: ablation(snapshot, config, profile),
+        "walk-forward": lambda: walk_forward(result, config.research.rolling_days),
+        "cost-sensitivity": lambda: cost_sensitivity(snapshot, config, profile),
+        "parameter-stability": lambda: parameter_stability(snapshot, config, profile),
+        "compare": lambda: compare(snapshot, config, profile),
+    }
+    return functions[command]()
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "analyze":
+        symbol = args.symbol_option or args.symbol
+        if not symbol:
+            raise SystemExit("analyze requires a symbol")
+        config = _config(args, symbol)
+        if args.technical_only and args.external_data:
+            raise SystemExit("--external-data is not used with --technical-only")
+        if args.technical_only:
+            technical = analyze_technical_snapshot(
+                _live_or_dataset(symbol, args.dataset, config, technical_only=True), config
+            )
+            selected = set(args.horizons)
+            technical["horizons"] = {
+                key: value for key, value in technical["horizons"].items() if key in selected
+            }
+            output = technical_json(technical) if args.format == "json" else technical_markdown(technical)
+            print(output)
+            _save_technical_report(technical, args.output_dir or config.output.output_dir, args.format)
+            return 0
+        report = analyze_snapshot(
+            _live_or_dataset(symbol, args.dataset, config, args.external_data), config, args.profile
+        )
+        selected = {Horizon(value) for value in args.horizons}
+        report = report.model_copy(
+            update={
+                "horizons": {
+                    key: value for key, value in report.horizons.items() if key in selected
+                }
+            }
+        )
+        output = report_json(report) if args.format == "json" else report_markdown(report)
+        print(output)
+        _save_report(report, args.output_dir or config.output.output_dir, args.format)
     elif args.command == "compare":
         rows = []
         for symbol in args.symbols:
             try:
-                symbol_profile = (
-                    profile_for_symbol(symbol).name if args.profile == "auto" else args.profile
-                )
-                symbol_config = load_config(args.config, symbol_profile)
+                config = _config(args, symbol)
                 report = analyze_snapshot(
-                    _snapshot(symbol, None, symbol_config), symbol_config, args.profile
+                    _live_or_dataset(symbol, None, config), config, args.profile
                 )
                 rows.append(
                     {
-                        "symbol": symbol,
+                        "symbol": report.symbol,
                         "profile": report.profile,
                         "confidence": report.confidence,
-                        "plans": {k.value: v.status.value for k, v in report.plans.items()},
+                        "regime": report.market["regime"],
+                        "horizons": {
+                            key.value: value.status.value for key, value in report.horizons.items()
+                        },
                     }
                 )
             except Exception as exc:
-                rows.append({"symbol": symbol, "status": "failed", "error": str(exc)})
-        _emit(sorted(rows, key=lambda row: row.get("confidence", -1), reverse=True))
+                rows.append({"symbol": symbol, "status": "failed", "error": type(exc).__name__})
+        _emit(sorted(rows, key=lambda item: item.get("confidence", -1), reverse=True))
     elif args.command == "validate-entry":
-        report = json.loads(Path(args.report).read_text(encoding="utf-8"))
-        plan = report["plans"][args.horizon]
-        valid = (
-            plan["status"] in {"candidate", "entry_validated"}
-            and plan.get("stop")
-            and plan.get("take_profit_1")
+        report = AnalysisReport.model_validate_json(Path(args.report).read_text(encoding="utf-8"))
+        config = load_config(args.config, report.profile)
+        snapshot = (
+            load_dataset(args.dataset)
+            if args.dataset
+            else CompositeDataSource(timeout=config.data.request_timeout_seconds).snapshot(
+                report.symbol, config.data.timeframes, config.data.history_limit
+            )
         )
-        _emit({"valid": bool(valid), "horizon": args.horizon, "plan": plan})
+        _emit(validate_entry(report, snapshot, Horizon(args.horizon)).model_dump(mode="json"))
+    elif args.command == "fetch-dataset":
+        config = load_config(args.config, profile_for_symbol(args.symbol).name)
+        frames = list(config.data.timeframes) + (
+            ["15m"] if args.include_15m and "15m" not in config.data.timeframes else []
+        )
+        source = CompositeDataSource(timeout=config.data.request_timeout_seconds)
+        snapshot = (
+            source.history(
+                args.symbol,
+                frames,
+                _parse_utc(args.start),
+                _parse_utc(args.end) if args.end else None,
+            )
+            if args.start
+            else source.snapshot(args.symbol, frames, args.limit)
+        )
+        if args.external_data:
+            snapshot = snapshot.model_copy(
+                update={
+                    "auxiliary": {**snapshot.auxiliary, **load_external_context(args.external_data)}
+                }
+            )
+        _emit({"manifest": str(save_dataset(snapshot, args.output)), "symbol": snapshot.symbol})
     elif args.command == "backtest":
-        _emit(run_backtest(_load_snapshot(args.dataset), config, args.profile).as_dict())
-    elif args.command == "research":
-        _emit({"research": args.research_command, "status": "deterministic_no_auto_optimization"})
-    elif args.command == "portfolio":
-        broker = PaperBroker(config.storage.paper_account_file, config.storage.paper_trades_file)
-        account = (
-            broker.load()
-            if args.portfolio_command == "show"
-            else broker.execute(args.symbol, args.side, args.quantity, args.price)
+        snapshot = load_dataset(args.dataset)
+        config = _config(args, snapshot.symbol)
+        result = run_backtest(
+            snapshot, config, args.profile, [Horizon(value) for value in args.horizons]
         )
-        _emit(account.model_dump(mode="json"))
-    elif args.command == "journal":
-        if args.journal_command == "add":
-            add_entry(config.storage.journal_file, json.loads(args.record))
-        entries = read_entries(config.storage.journal_file)
-        if args.journal_command == "compare":
-            _emit(
-                {
-                    "trades": len(entries),
-                    "realized_pnl": sum(float(item.get("pnl", 0)) for item in entries),
-                    "with_plan": sum(bool(item.get("plan_event_id")) for item in entries),
-                }
-            )
-        else:
-            _emit(entries)
-    elif args.command == "exchange":
-        adapter = BinanceAdapter(config)
-        if args.exchange_command == "draft":
-            order, token = adapter.create_draft(
-                args.symbol, args.side, args.quantity, args.reference_price
-            )
-            _emit(
-                {
-                    "draft": order.model_dump(mode="json"),
-                    "confirmation_token": token,
-                    "warning": "token is shown once; user confirmation is required",
-                }
-            )
-        elif args.exchange_command == "place":
-            draft = OrderDraft.model_validate_json(Path(args.draft).read_text(encoding="utf-8"))
-            result = adapter.place_spot_order(draft, args.confirmation_token)
-            record = {"kind": "exchange_order", **result.model_dump(mode="json")}
-            add_entry(config.storage.journal_file, record)
-            _emit(record)
-        else:
-            result = adapter.query_order(args.symbol, args.client_order_id)
-            _emit(result.model_dump(mode="json") if result else {"status": "not_found"})
+        _emit(result.model_dump(mode="json"))
+    elif args.command == "research":
+        snapshot = load_dataset(args.dataset)
+        config = _config(args, snapshot.symbol)
+        _emit(_run_research(args.research_command, snapshot, config, args.profile))
     return 0
 
 

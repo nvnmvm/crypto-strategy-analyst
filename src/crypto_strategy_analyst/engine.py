@@ -1,350 +1,583 @@
-"""One deterministic strategy engine for current and historical evaluation."""
+"""Single public analysis engine shared by live analysis and replay."""
 
 from __future__ import annotations
 
 import hashlib
+import json
+from datetime import timedelta
 
 import numpy as np
 
 from .config import AppConfig
+from .events import make_event
+from .indicators import indicator_map
+from .levels import detect_levels
 from .models import (
-    AnalysisEvent,
     AnalysisReport,
     Availability,
-    ComponentScores,
     DataPoint,
     Horizon,
     HorizonPlan,
+    MarketRegime,
     MarketSnapshot,
-    PriceLevel,
+    RiskSuggestion,
+    ScoreCard,
     SignalStatus,
 )
 from .profiles.base import AssetProfile
 from .profiles.registry import get_profile
+from .regime import classify_regime
+from .strategies import StrategyContext, evaluate_strategies
+from .structure import ChartPattern, detect_chart_patterns
+from .technical_analysis import analyze_indicators
 
 HORIZON_FRAMES = {
-    Horizon.SHORT: ["4h", "1h", "15m"],
-    Horizon.SWING: ["1d", "4h", "1h"],
-    Horizon.LONG: ["1w", "1d", "4h"],
+    Horizon.SHORT: ("4h", "1h", "15m"),
+    Horizon.SWING: ("1d", "4h", "1h"),
+    Horizon.LONG: ("1w", "1d", "4h"),
+}
+VALIDITY_HOURS = {Horizon.SHORT: 8, Horizon.SWING: 48, Horizon.LONG: 336}
+REGIME_CONFIDENCE = {
+    MarketRegime.STRONG_BULL: 5,
+    MarketRegime.BULLISH: 3,
+    MarketRegime.BULL_PULLBACK: 1,
+    MarketRegime.RANGE: -2,
+    MarketRegime.BEARISH: -8,
+    MarketRegime.CAPITULATION: -12,
+    MarketRegime.RECOVERY: -1,
 }
 
 
-def _series(snapshot: MarketSnapshot, frame: str) -> np.ndarray:
-    return np.array([bar.close for bar in snapshot.completed(frame)], dtype=float)
+def _required_failures(snapshot: MarketSnapshot) -> list[str]:
+    failures = []
+    if not snapshot.trading_rules.usable_at(snapshot.as_of):
+        failures.append("trading_rules")
+    for timeframe in ("1w", "1d", "4h", "1h"):
+        if not snapshot.completed(timeframe):
+            failures.append(f"candles:{timeframe}")
+    return failures
 
 
-def _atr(snapshot: MarketSnapshot, frame: str) -> float:
-    bars = snapshot.completed(frame)
-    if len(bars) < 2:
-        return snapshot.price * 0.02
-    values = [
-        max(bar.high - bar.low, abs(bar.high - prev.close), abs(bar.low - prev.close))
-        for prev, bar in zip(bars[-15:-1], bars[-14:], strict=False)
-    ]
-    return float(np.mean(values)) if values else snapshot.price * 0.02
-
-
-def _trend_score(values: np.ndarray) -> float:
-    if len(values) < 20:
-        return 50
-    fast = float(np.mean(values[-10:]))
-    slow = float(np.mean(values[-20:]))
-    distance = (fast / slow - 1) * 500
-    momentum = (values[-1] / values[-10] - 1) * 250
-    return float(np.clip(50 + distance + momentum, 0, 100))
-
-
-def _levels(snapshot: MarketSnapshot, config: AppConfig) -> list[PriceLevel]:
-    """Cluster pivots and count separated reactions, not adjacent candle noise."""
-    levels: list[PriceLevel] = []
-    for frame in ("1w", "1d", "4h", "1h"):
-        bars = snapshot.completed(frame)
-        if len(bars) < 8:
-            continue
-        atr = _atr(snapshot, frame)
-        tolerance = atr * config.strategy.level_tolerance_atr
-        candidates: list[tuple[float, str, int]] = []
-        for index in range(2, len(bars) - 2):
-            window = bars[index - 2 : index + 3]
-            if bars[index].low == min(item.low for item in window):
-                candidates.append((bars[index].low, "support", index))
-            if bars[index].high == max(item.high for item in window):
-                candidates.append((bars[index].high, "resistance", index))
-        for price, kind, _first_index in candidates:
-            matching = [x for x in candidates if x[1] == kind and abs(x[0] - price) <= tolerance]
-            separated: list[int] = []
-            for _, _, index in matching:
-                if not separated or index - separated[-1] >= config.strategy.touch_cooldown_bars:
-                    separated.append(index)
-            levels.append(
-                PriceLevel(
-                    kind=kind,
-                    price=float(np.mean([x[0] for x in matching])),
-                    timeframe=frame,
-                    strength=min(100, 25 + len(separated) * 15),
-                    touches=max(1, len(separated)),
-                )
-            )
-    levels.sort(key=lambda level: (abs(level.price - snapshot.price), -level.strength))
-    deduped: list[PriceLevel] = []
-    tolerance = _atr(snapshot, "1d") * config.strategy.level_tolerance_atr
-    for level in levels:
-        duplicate = next(
-            (
-                x
-                for x in deduped
-                if x.kind == level.kind and abs(x.price - level.price) <= tolerance
-            ),
-            None,
-        )
-        if duplicate is None:
-            deduped.append(level)
-        elif level.strength > duplicate.strength:
-            deduped[deduped.index(duplicate)] = level
-    return deduped[:12]
-
-
-def _aux_score(snapshot: MarketSnapshot, names: tuple[str, ...], keyword: str) -> float:
+def _component_score(snapshot: MarketSnapshot, names: tuple[str, ...]) -> float | None:
     values: list[float] = []
     for name in names:
         point = snapshot.auxiliary.get(name)
-        if (
-            point
-            and point.status == Availability.AVAILABLE
-            and (point.observed_at is None or point.observed_at <= snapshot.as_of)
-        ):
-            value = point.value
-            if isinstance(value, (int, float)):
-                values.append(float(np.clip(50 + value, 0, 100)))
-            elif isinstance(value, dict) and isinstance(value.get("score"), (int, float)):
-                values.append(float(value["score"]))
-    return float(np.mean(values)) if values else (45 if keyword else 50)
+        if not point or not point.usable_at(snapshot.as_of):
+            continue
+        value = point.value
+        number = (
+            value
+            if isinstance(value, (int, float))
+            else value.get("score")
+            if isinstance(value, dict)
+            else None
+        )
+        if isinstance(number, (int, float)):
+            values.append(float(np.clip(50 + number if -20 <= number <= 20 else number, 0, 100)))
+    return float(np.mean(values)) if values else None
 
 
-def _scores(snapshot: MarketSnapshot, profile: AssetProfile) -> ComponentScores:
-    trends = [_trend_score(_series(snapshot, frame)) for frame in ("1w", "1d", "4h", "1h")]
-    technical = sum(
-        score * weight
-        for score, weight in zip(trends, profile.timeframe_weights.values(), strict=True)
+def _score_card(
+    snapshot: MarketSnapshot,
+    indicators,
+    profile: AssetProfile,
+    profile_scores: dict[str, float | None],
+    confidence_adjustment: float,
+) -> ScoreCard:
+    technical_values = [indicator.trend_strength for indicator in indicators.values()]
+    technical = float(np.mean(technical_values)) if technical_values else 0
+    components: dict[str, float | None] = {
+        "technical": technical,
+        "derivatives": _component_score(snapshot, ("funding", "open_interest", "liquidations")),
+        "onchain": _component_score(snapshot, ("onchain", "chain_activity", "gas", "staking")),
+        "macro": _component_score(snapshot, ("macro", "etf_flow", "eth_etf_flow", "btc_dominance")),
+        "relative_strength": _component_score(
+            snapshot, ("eth_btc", "bnb_btc", "sol_btc", "sol_eth")
+        ),
+        "asset_specific": _component_score(snapshot, profile.context_fields),
+    }
+    components = profile.adjust_scores(components, snapshot, Horizon.SWING)
+    components.update({key: value for key, value in profile_scores.items() if key in components})
+    required_total = 5
+    required_available = required_total - len(_required_failures(snapshot))
+    auxiliary_available = sum(
+        bool(snapshot.auxiliary.get(name) and snapshot.auxiliary[name].usable_at(snapshot.as_of))
+        for name in profile.context_fields
     )
-    return ComponentScores(
-        technical=technical,
-        derivatives=_aux_score(snapshot, ("funding", "open_interest", "liquidations"), "d"),
-        onchain=_aux_score(snapshot, ("onchain", "chain_activity", "network_health"), "o"),
-        macro=_aux_score(snapshot, ("macro", "etf_flow", "btc_dominance"), "m"),
-        relative_strength=_aux_score(snapshot, ("eth_btc", "bnb_btc", "sol_btc", "sol_eth"), "r"),
-        asset_specific=_aux_score(snapshot, profile.context_fields, "a"),
+    completeness = (
+        100
+        * (required_available + auxiliary_available)
+        / max(1, required_total + len(profile.context_fields))
     )
+    weights = {
+        "technical": 0.55,
+        "derivatives": 0.1,
+        "onchain": 0.08,
+        "macro": 0.09,
+        "relative_strength": 0.12,
+        "asset_specific": 0.06,
+    }
+    present_weight = sum(weights[name] for name, value in components.items() if value is not None)
+    raw = sum(
+        float(value) * weights[name] for name, value in components.items() if value is not None
+    ) / max(present_weight, 1e-12)
+    confidence = min(
+        profile.confidence_cap, raw * (0.55 + 0.45 * completeness / 100) + confidence_adjustment
+    )
+    return ScoreCard(**components, data_completeness=completeness, confidence=max(0, confidence))
 
 
-def _required_failures(snapshot: MarketSnapshot) -> list[str]:
-    failures: list[str] = []
-    for name, point in {
-        "trading_rules": snapshot.trading_rules,
-        "timestamp": snapshot.timestamp,
-        "volume": snapshot.volume,
-    }.items():
-        if point.status != Availability.AVAILABLE:
-            failures.append(name)
-    for frame in ("1w", "1d", "4h", "1h"):
-        if not snapshot.completed(frame):
-            failures.append(f"candles:{frame}")
-    return failures
+def _minimum_r(config: AppConfig, horizon: Horizon) -> float:
+    return {
+        Horizon.SHORT: config.horizons.short_minimum_r,
+        Horizon.SWING: config.horizons.swing_minimum_r,
+        Horizon.LONG: config.horizons.long_minimum_r,
+    }[horizon]
+
+
+def _base_risk(config: AppConfig, horizon: Horizon) -> float:
+    return {
+        Horizon.SHORT: config.horizons.short_risk,
+        Horizon.SWING: config.horizons.swing_risk,
+        Horizon.LONG: config.horizons.long_risk,
+    }[horizon]
 
 
 def _plan(
     horizon: Horizon,
     snapshot: MarketSnapshot,
-    levels: list[PriceLevel],
-    confidence: float,
+    indicators,
+    levels,
     profile: AssetProfile,
+    score: ScoreCard,
+    blocked: list[str],
+    profile_adjustment: float,
     config: AppConfig,
-    blocked: bool,
+    chart_patterns: list[ChartPattern],
 ) -> HorizonPlan:
-    frames = [x for x in HORIZON_FRAMES[horizon] if snapshot.completed(x)]
-    trend = float(np.mean([_trend_score(_series(snapshot, frame)) for frame in frames]))
-    support = next((x for x in levels if x.kind == "support" and x.price < snapshot.price), None)
-    resistance = next(
-        (x for x in levels if x.kind == "resistance" and x.price > snapshot.price), None
-    )
-    atr = _atr(snapshot, frames[0]) if frames else snapshot.price * 0.02
-    stop = (
-        min(snapshot.price - profile.stop_atr * atr, support.price - 0.2 * atr)
-        if support
-        else snapshot.price - profile.stop_atr * atr
-    )
-    risk = snapshot.price - stop
-    target_2r = snapshot.price + risk * config.strategy.minimum_reward_risk
-    target_3r = snapshot.price + risk * 3
-    strategies = [
-        name
-        for name in (
-            "trend_pullback",
-            "support_rebound",
-            "breakout_retest",
-            "range_reversal",
-            "bear_reversal",
-            "bear_accumulation",
-        )
-        if getattr(config.strategy, name)
-    ]
-    strategy = strategies[0] if strategies else "disabled"
-    reasons = [f"trend_score={trend:.1f}", f"confidence={confidence:.1f}"]
-    if blocked or not strategies:
-        status = SignalStatus.NO_TRADE
-        reasons.append("required data, hard filter, or strategy toggle blocked entry")
-    elif trend < 45 or confidence < config.strategy.minimum_confidence:
-        status = SignalStatus.WATCH
-    elif resistance and resistance.price < target_2r:
-        status = SignalStatus.WATCH
-        reasons.append("nearest resistance leaves less than 2R")
-    elif confidence >= config.strategy.entry_confidence:
-        status = SignalStatus.CANDIDATE
-    else:
-        status = SignalStatus.NEAR_KEY_LEVEL
-    tp1 = min(target_2r, resistance.price - 0.1 * atr) if resistance else target_2r
-    higher_resistance = next(
-        (x for x in levels if x.kind == "resistance" and x.price > tp1 + atr), None
-    )
-    tp2 = (
-        min(target_3r, higher_resistance.price - 0.1 * atr)
-        if higher_resistance
-        else (target_3r if resistance is None else None)
-    )
-    if status in {SignalStatus.NO_TRADE, SignalStatus.WATCH}:
+    frames = HORIZON_FRAMES[horizon]
+    primary = frames[0]
+    bars = snapshot.completed(primary)
+    indicator = indicators.get(primary)
+    if not bars or indicator is None:
         return HorizonPlan(
             horizon=horizon,
-            status=status,
-            strategy=strategy,
-            timeframes=frames,
-            reasons=reasons,
-            invalidation=["trend or data quality deteriorates"],
+            status=SignalStatus.NO_TRADE,
+            market_regime=MarketRegime.RANGE,
+            confidence=0,
+            risk_suggestion=RiskSuggestion(level="none", risk_fraction=0),
+            failed_conditions=[f"missing_primary_timeframe:{primary}"],
         )
-    if tp2 is None or tp2 < target_2r:
+    regime = classify_regime(bars, indicator)
+    risk_multiplier, risk_reasons = profile.adjust_risk(snapshot, horizon)
+    regime_risk = {
+        MarketRegime.STRONG_BULL: 1.0,
+        MarketRegime.BULLISH: 1.0,
+        MarketRegime.BULL_PULLBACK: 0.85,
+        MarketRegime.RANGE: 0.7,
+        MarketRegime.BEARISH: 0.45,
+        MarketRegime.CAPITULATION: 0.25,
+        MarketRegime.RECOVERY: 0.6,
+    }[regime]
+    risk_multiplier *= regime_risk
+    regime_minimum_r = _minimum_r(config, horizon) + (
+        0.3 if regime in {MarketRegime.BEARISH, MarketRegime.CAPITULATION} else 0
+    )
+    confirmed_bearish = [
+        pattern
+        for pattern in chart_patterns
+        if pattern.direction == "bearish" and pattern.state == "confirmed"
+    ]
+    forming_bearish = [
+        pattern
+        for pattern in chart_patterns
+        if pattern.direction == "bearish" and pattern.state == "forming"
+    ]
+    pattern_blockers = [f"confirmed_bearish_pattern:{pattern.name}" for pattern in confirmed_bearish]
+    pattern_observations = [
+        f"forming_bearish_pattern:{pattern.name}" for pattern in forming_bearish
+    ]
+    active_blockers = blocked + pattern_blockers
+    confidence = float(
+        np.clip(
+            score.confidence
+            + REGIME_CONFIDENCE[regime]
+            + profile_adjustment
+            - 6 * len(forming_bearish),
+            0,
+            profile.confidence_cap,
+        )
+    )
+    parameters = profile.adjust_parameters(horizon)
+    local_strategy = config.strategy.model_copy(
+        update={
+            "stop_buffer_atr": config.strategy.stop_buffer_atr
+            * parameters.get("stop_multiplier", 1),
+            "volume_ratio": parameters.get("volume_requirement", config.strategy.volume_ratio),
+            "breakout_atr": parameters.get("breakout_atr", config.strategy.breakout_atr),
+            "entry_deviation_atr": min(
+                config.strategy.entry_deviation_atr,
+                parameters.get("chase_limit_atr", config.strategy.entry_deviation_atr),
+            ),
+        }
+    )
+    local_config = config.model_copy(update={"strategy": local_strategy})
+    context = StrategyContext(
+        horizon, bars, indicator, regime, levels, local_config, regime_minimum_r
+    )
+    results = evaluate_strategies(context)
+    allowed = profile.filter_strategies(regime, horizon, [result.strategy for result in results])
+    matches = [result for result in results if result.matched and result.strategy in allowed]
+    matches.sort(
+        key=lambda item: (
+            len(item.structure_confirmations),
+            item.reward_risk or 0,
+            len(item.secondary_confirmations),
+        ),
+        reverse=True,
+    )
+    nearby = [
+        level
+        for level in levels
+        if level.distance_percent <= config.levels.near_percent
+        and level.distance_atr <= config.levels.near_atr
+        and level.strength >= 45
+    ]
+    risk_fraction = _base_risk(config, horizon) * risk_multiplier
+    if active_blockers:
+        status = SignalStatus.NO_TRADE
+    elif matches and confidence >= config.strategy.candidate_confidence:
+        status = SignalStatus.CANDIDATE
+    elif nearby:
         status = SignalStatus.NEAR_KEY_LEVEL
-        reasons.append("TP2 cannot be placed honestly; signal downgraded")
+    elif confidence >= config.strategy.minimum_confidence:
+        status = SignalStatus.WATCH
+    else:
+        status = SignalStatus.NO_TRADE
+    selected = matches[0] if status == SignalStatus.CANDIDATE else None
     return HorizonPlan(
         horizon=horizon,
         status=status,
-        direction="long",
-        strategy=strategy,
-        timeframes=frames,
-        entry=snapshot.price,
-        stop=stop,
-        take_profit_1=tp1,
-        take_profit_2=tp2,
-        reward_risk_1=(tp1 - snapshot.price) / risk,
-        reward_risk_2=(tp2 - snapshot.price) / risk if tp2 else None,
-        position_fraction=min(
-            config.risk.maximum_position_fraction,
-            config.risk.risk_per_trade / (risk / snapshot.price),
+        market_regime=regime,
+        strategy=selected.strategy if selected else None,
+        key_levels=nearby[:4],
+        entry_range=selected.entry_range if selected else None,
+        planned_entry=(selected.entry_range.lower + selected.entry_range.upper) / 2
+        if selected and selected.entry_range
+        else None,
+        stop_loss=selected.stop_loss if selected else None,
+        take_profits=selected.take_profits if selected else [],
+        reward_risk=selected.reward_risk if selected else None,
+        minimum_reward_risk=regime_minimum_r,
+        valid_from=snapshot.as_of if selected else None,
+        valid_until=snapshot.as_of
+        + timedelta(hours=VALIDITY_HOURS[horizon] * config.strategy.validity_bars)
+        if selected
+        else None,
+        structure_confirmations=selected.structure_confirmations if selected else [],
+        secondary_confirmations=selected.secondary_confirmations if selected else [],
+        failed_conditions=active_blockers
+        + (
+            []
+            if selected
+            else sorted({condition for result in results for condition in result.failed_conditions})
+        ),
+        invalidation_conditions=selected.invalidation_conditions if selected else [],
+        confidence=confidence,
+        risk_suggestion=RiskSuggestion(
+            level="none"
+            if active_blockers
+            else "reduced"
+            if risk_multiplier < 0.75 or pattern_observations
+            else "normal",
+            risk_fraction=0 if active_blockers else risk_fraction,
+            rationale=risk_reasons + active_blockers + pattern_observations,
+        ),
+        strategy_results=results,
+    )
+
+
+def _fresh_snapshot(snapshot: MarketSnapshot, config: AppConfig) -> MarketSnapshot:
+    auxiliary = {
+        name: (
+            point.model_copy(
+                update={
+                    "status": Availability.STALE,
+                    "detail": "freshness_threshold_exceeded",
+                }
+            )
+            if point.status == Availability.AVAILABLE
+            and point.freshness_seconds is not None
+            and point.freshness_seconds > config.data.stale_after_seconds
+            else point
         )
-        * profile.position_multiplier,
-        reasons=reasons,
-        invalidation=[f"close below {stop:.8g}"],
+        for name, point in snapshot.auxiliary.items()
+    }
+    return snapshot.model_copy(update={"auxiliary": auxiliary})
+
+
+def _availability(snapshot: MarketSnapshot, completed) -> dict[str, DataPoint]:
+    availability = {"trading_rules": snapshot.trading_rules, **snapshot.auxiliary}
+    for timeframe in ("1w", "1d", "4h", "1h", "15m"):
+        bars = completed.get(timeframe, [])
+        availability[f"candles:{timeframe}"] = DataPoint(
+            status=Availability.AVAILABLE if bars else Availability.NOT_AVAILABLE,
+            source="market_snapshot",
+            observed_at=bars[-1].close_time if bars else None,
+            freshness_seconds=max(0, (snapshot.as_of - bars[-1].close_time).total_seconds())
+            if bars
+            else None,
+            value={"bars": len(bars)},
+        )
+    return availability
+
+
+def _events(snapshot, profile, plans, score, required, hard_filters, chart_patterns):
+    events = []
+    for horizon, plan in plans.items():
+        if plan.status == SignalStatus.NEAR_KEY_LEVEL and plan.key_levels:
+            level = plan.key_levels[0]
+            events.append(
+                make_event(
+                    "near_key_level",
+                    snapshot.symbol,
+                    profile.name,
+                    horizon,
+                    snapshot.as_of,
+                    f"{level.type}:{level.midpoint:.8g}",
+                    {
+                        "level_type": level.type,
+                        "level_range": {"lower": level.lower, "upper": level.upper},
+                        "distance_percent": level.distance_percent,
+                        "distance_atr": level.distance_atr,
+                        "level_strength": level.strength,
+                        "required_confirmation": ["higher_low", "reclaim_ema20"],
+                    },
+                )
+            )
+        if plan.status == SignalStatus.CANDIDATE:
+            events.append(
+                make_event(
+                    "candidate_created",
+                    snapshot.symbol,
+                    profile.name,
+                    horizon,
+                    snapshot.as_of,
+                    f"{plan.strategy}:{plan.entry_range}",
+                    {
+                        "strategy": plan.strategy,
+                        "entry_range": plan.entry_range.model_dump() if plan.entry_range else None,
+                    },
+                )
+            )
+    if required:
+        events.append(
+            make_event(
+                "data_failure",
+                snapshot.symbol,
+                profile.name,
+                None,
+                snapshot.as_of,
+                ",".join(required),
+                {"missing": required},
+                "critical",
+            )
+        )
+    if hard_filters:
+        events.append(
+            make_event(
+                "risk_alert",
+                snapshot.symbol,
+                profile.name,
+                None,
+                snapshot.as_of,
+                ",".join(hard_filters),
+                {"hard_filters": hard_filters},
+                "critical",
+            )
+        )
+    for timeframe, patterns in chart_patterns.items():
+        for pattern in patterns:
+            if pattern.direction == "bearish" and pattern.state == "confirmed":
+                events.append(
+                    make_event(
+                        "risk_alert",
+                        snapshot.symbol,
+                        profile.name,
+                        None,
+                        snapshot.as_of,
+                        f"confirmed_bearish_pattern:{timeframe}:{pattern.name}",
+                        {
+                            "timeframe": timeframe,
+                            "pattern": pattern.as_dict(),
+                            "action": "suppress_long_candidate",
+                        },
+                        "warning",
+                    )
+                )
+    if profile.name == "generic":
+        events.append(
+            make_event(
+                "profile_warning",
+                snapshot.symbol,
+                profile.name,
+                None,
+                snapshot.as_of,
+                "generic_profile",
+                {"profile_confidence": "limited"},
+                "warning",
+            )
+        )
+    events.append(
+        make_event(
+            "analysis_completed",
+            snapshot.symbol,
+            profile.name,
+            None,
+            snapshot.as_of,
+            ";".join(f"{h.value}:{plans[h].status.value}" for h in Horizon),
+            {"confidence": score.confidence},
+        )
+    )
+    return events
+
+
+def _report_id(snapshot: MarketSnapshot, completed) -> str:
+    fingerprint = json.dumps(
+        {
+            frame: [bar.close_time.isoformat(), bar.close]
+            for frame, bars in completed.items()
+            for bar in bars[-1:]
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(
+        f"{snapshot.symbol}|{snapshot.as_of.isoformat()}|{fingerprint}".encode()
+    ).hexdigest()[:24]
+
+
+def _assemble_report(
+    snapshot,
+    profile,
+    indicators,
+    levels,
+    plans,
+    score,
+    availability,
+    events,
+    warnings,
+    required,
+    hard_filters,
+    report_id,
+    chart_patterns,
+    technical_analysis,
+) -> AnalysisReport:
+    primary_regime = plans[Horizon.SWING].market_regime
+    return AnalysisReport(
+        report_id=report_id,
+        symbol=snapshot.symbol,
+        profile=profile.name,
+        profile_confidence="limited" if profile.name == "generic" else "dedicated",
+        generated_at=snapshot.as_of,
+        evaluation_time=snapshot.as_of,
+        market={
+            "regime": primary_regime.value,
+            "volatility": indicators.get("1d").atr_percent
+            if indicators.get("1d")
+            else "not_available",
+            "liquidity": snapshot.auxiliary.get(
+                "liquidity", DataPoint(status=Availability.NOT_AVAILABLE, source="not_available")
+            ).model_dump(mode="json"),
+            "chart_patterns": {
+                timeframe: [pattern.as_dict() for pattern in patterns]
+                for timeframe, patterns in chart_patterns.items()
+            },
+            "technical_analysis": technical_analysis,
+        },
+        data_availability=availability,
+        scores=score,
+        confidence=score.confidence,
+        key_levels={
+            "supports": [level for level in levels if level.type == "support"],
+            "resistances": [level for level in levels if level.type == "resistance"],
+        },
+        relative_strength={
+            name: point.model_dump(mode="json")
+            for name, point in snapshot.auxiliary.items()
+            if name in {"eth_btc", "bnb_btc", "sol_btc", "sol_eth"}
+        },
+        horizons=plans,
+        events=events,
+        warnings=warnings + [f"required_data_failure:{item}" for item in required],
+        limitations=["research_only", "historical auxiliary coverage may be incomplete"],
+        hard_filters=hard_filters,
     )
 
 
 def evaluate_setup_at_time(
-    snapshot: MarketSnapshot,
-    config: AppConfig,
-    profile_name: str = "auto",
+    snapshot: MarketSnapshot, config: AppConfig, profile_name: str = "auto"
 ) -> AnalysisReport:
-    """Public evaluation entry point used unchanged by analyze and backtest."""
+    if config.config_version != 3:
+        raise ValueError("configuration version 3 is required")
+    if profile_name == "auto" and config.profile != "auto":
+        profile_name = config.profile
+    snapshot = _fresh_snapshot(snapshot, config)
     profile = get_profile(profile_name, snapshot.symbol)
-    scores = _scores(snapshot, profile)
-    available_aux = sum(
-        snapshot.auxiliary.get(name) is not None
-        and snapshot.auxiliary[name].status == Availability.AVAILABLE
-        and (
-            snapshot.auxiliary[name].observed_at is None
-            or snapshot.auxiliary[name].observed_at <= snapshot.as_of
-        )
-        for name in profile.context_fields
+    completed = {timeframe: snapshot.completed(timeframe) for timeframe in snapshot.candles}
+    indicators = indicator_map(completed, config.indicators)
+    technical_analysis = analyze_indicators(indicators, config.indicators)
+    chart_patterns = {
+        timeframe: detect_chart_patterns(completed[timeframe], indicator)
+        for timeframe, indicator in indicators.items()
+    }
+    levels = (
+        detect_levels(completed, indicators, snapshot.price, config.levels) if indicators else []
     )
-    completeness = available_aux / max(1, len(profile.context_fields))
-    confidence = min(
-        profile.confidence_cap,
-        scores.technical * 0.55
-        + scores.relative_strength * 0.12
-        + scores.derivatives * 0.1
-        + scores.onchain * 0.08
-        + scores.macro * 0.08
-        + scores.asset_specific * 0.07,
+    evaluations = {horizon: profile.evaluate_context(snapshot, horizon) for horizon in Horizon}
+    profile_scores: dict[str, float | None] = {}
+    for value in evaluations.values():
+        profile_scores.update(value.component_scores)
+    average_adjustment = float(
+        np.mean([value.confidence_adjustment for value in evaluations.values()])
     )
-    confidence *= 0.85 + 0.15 * completeness
-    levels = _levels(snapshot, config)
+    score = _score_card(snapshot, indicators, profile, profile_scores, average_adjustment)
     required = _required_failures(snapshot)
-    hard_filters = profile.hard_filters(snapshot)
+    hard_filters = sorted(
+        {item for horizon in Horizon for item in profile.apply_hard_filters(snapshot, horizon)}
+    )
     plans = {
         horizon: _plan(
-            horizon, snapshot, levels, confidence, profile, config, bool(required or hard_filters)
+            horizon,
+            snapshot,
+            indicators,
+            levels,
+            profile,
+            score,
+            required + hard_filters,
+            evaluations[horizon].confidence_adjustment,
+            config,
+            chart_patterns.get(HORIZON_FRAMES[horizon][0], []),
         )
         for horizon in Horizon
     }
-    events: list[AnalysisEvent] = []
-    for horizon, plan in plans.items():
-        digest = hashlib.sha256(
-            f"{snapshot.symbol}|{snapshot.as_of.isoformat()}|{horizon}|{plan.status}".encode()
-        ).hexdigest()[:20]
-        events.append(
-            AnalysisEvent(
-                event_id=digest,
-                event_type=plan.status,
-                symbol=snapshot.symbol,
-                horizon=horizon,
-                occurred_at=snapshot.as_of,
-                payload={"confidence": round(confidence, 2), "profile": profile.name},
-            )
-        )
-    availability = {
-        "current_price": DataPoint(
-            status=Availability.AVAILABLE,
-            source="market_snapshot",
-            observed_at=snapshot.as_of,
-            freshness_seconds=0,
-            value=snapshot.price,
-        ),
-        "trading_rules": snapshot.trading_rules,
-        "timestamp": snapshot.timestamp,
-        "volume": snapshot.volume,
-        **snapshot.auxiliary,
-    }
-    for frame in ("1w", "1d", "4h", "1h", "15m"):
-        bars = snapshot.completed(frame)
-        availability[f"candles:{frame}"] = DataPoint(
-            status=Availability.AVAILABLE if bars else Availability.NOT_AVAILABLE,
-            source="market_snapshot",
-            observed_at=bars[-1].close_time if bars else None,
-            freshness_seconds=(
-                max(0, (snapshot.as_of - bars[-1].close_time).total_seconds()) if bars else None
-            ),
-            value={"bars": len(bars)},
-        )
-    warnings = [f"required data unavailable: {name}" for name in required]
-    warnings += [f"hard filter: {name}" for name in hard_filters]
-    missing_context = [name for name in profile.context_fields if name not in snapshot.auxiliary]
-    return AnalysisReport(
-        generated_at=snapshot.as_of,
-        profile=profile.name,
-        market={
-            "symbol": snapshot.symbol,
-            "price": snapshot.price,
-            "as_of": snapshot.as_of,
-            "venue": "binance_spot",
-        },
-        data_availability=availability,
-        scores=scores,
-        confidence=round(confidence, 2),
-        key_levels=levels,
-        relative_strength={"score": scores.relative_strength},
-        plans=plans,
-        events=events,
-        chart_data={},
-        warnings=warnings,
-        limitations=["research output; no profit guarantee"]
-        + [f"missing context: {x}" for x in missing_context],
-        hard_filters=hard_filters,
+    warnings = sorted({warning for value in evaluations.values() for warning in value.warnings})
+    availability = _availability(snapshot, completed)
+    events = _events(snapshot, profile, plans, score, required, hard_filters, chart_patterns)
+    return _assemble_report(
+        snapshot,
+        profile,
+        indicators,
+        levels,
+        plans,
+        score,
+        availability,
+        events,
+        warnings,
+        required,
+        hard_filters,
+        _report_id(snapshot, completed),
+        chart_patterns,
+        technical_analysis,
     )
 
 

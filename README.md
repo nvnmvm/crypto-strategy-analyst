@@ -1,47 +1,57 @@
-# crypto-strategy-analyst v0.2.0
+# crypto-strategy-analyst v0.3.0
 
-面向 OpenClaw 的主流加密货币现货分析 Skill。公共引擎对 BTC、ETH、BNB、SOL 使用独立资产 Profile，对其他交易对使用受限置信度的 Generic Profile；短线、波段、长线计划分别输出。实时分析与回测共用 `evaluate_setup_at_time`，历史回放只读取当时已收盘的 1w/1d/4h/1h（可选 15m）K 线。
+由 OpenClaw 调用的主流加密货币盘面分析 Skill。它获取调用者指定的公开市场数据，自动选择 BTC、ETH、BNB、SOL 或 Generic Profile，分别生成短线、波段和长期计划，并输出 JSON、中文 Markdown 和机器可读事件。
+
+OpenClaw 决定分析币种、调用频率、监控升级、去重和通知。本项目不运行定时任务、不固定扫描列表、不发送 Telegram，也不管理账户或执行买卖。
 
 ## 安装
 
 ```bash
-openclaw skills install git:nvnmvm/crypto-strategy-analyst@v0.2.0
+openclaw skills install git:nvnmvm/crypto-strategy-analyst@v0.3.0
 python3 -m pip install ~/.openclaw/workspace/skills/crypto-strategy-analyst
 crypto-strategy-analyst --help
 ```
 
-开发环境需要 Python 3.11–3.13：
+开发环境支持 Python 3.11–3.13：
 
 ```bash
 python -m pip install -e '.[dev]'
 ruff check .
-pytest --cov=crypto_strategy_analyst --cov-fail-under=80
+python -m compileall src
+pytest --cov=crypto_strategy_analyst --cov-fail-under=85
 python -m build
 ```
 
-## 九个公共命令
+## 六个命令
 
 ```bash
-crypto-strategy-analyst analyze BTC/USDT --format markdown
-crypto-strategy-analyst compare BTC/USDT ETH/USDT SOL/USDT
-crypto-strategy-analyst validate-entry outputs/report.json --horizon swing
-crypto-strategy-analyst fetch-dataset BTC/USDT data/btc.json
-crypto-strategy-analyst backtest data/btc.json
-crypto-strategy-analyst research diagnose
-crypto-strategy-analyst portfolio show
-crypto-strategy-analyst journal add '{"symbol":"BTCUSDT","pnl":12}'
-crypto-strategy-analyst exchange draft BTCUSDT BUY 0.001 60000
+crypto-strategy-analyst analyze BTC/USDT --profile auto --horizons short swing long --format json
+crypto-strategy-analyst analyze BTC/USDT --technical-only --format markdown
+crypto-strategy-analyst compare BTC/USDT ETH/USDT BNB/USDT SOL/USDT
+crypto-strategy-analyst validate-entry outputs/BTC-USDT-report.json --dataset data/BTC-USDT --horizon swing
+crypto-strategy-analyst fetch-dataset BTC/USDT data/BTC-USDT
+crypto-strategy-analyst fetch-dataset BTC/USDT data/BTC-USDT-full --start 2017-08-01
+crypto-strategy-analyst backtest data/BTC-USDT --horizons short swing long
+crypto-strategy-analyst research diagnose data/BTC-USDT
 ```
 
-配置合并顺序为：代码默认值 < `config/default.yaml` < `config/profiles/*.yaml` < 用户配置 < CLI。OpenClaw 负责选择币种、调用频率和 Telegram 投递；Skill 自身不调度、不发送消息。
+`analyze` 同时支持 `--symbol BTC/USDT`、离线 `--dataset`、调用者提供的 `--external-data`、`--output-dir` 和 Markdown 输出。`analyze --technical-only` 只请求 Binance 公共 K 线、在本地一次计算 EMA/MA/RSI/MACD/ATR/量能，并且只返回每周期最后的指标快照；它不请求辅助数据、不扫描形态或关键点位、不返回原始 K 线。EMA200 的预热数据仍在本地计算，不进入 OpenClaw 上下文。`compare` 只比较调用者传入的币种，不内置扫描列表。
 
-## 安全边界
+## 分析规则
 
-- 默认 `trading_enabled: false`、`testnet: true`、`require_human_confirmation: true`。
-- v0.2.0 仅提供 Binance Spot 适配器；不支持合约、杠杆、借币、做空、提现或划转。
-- 密钥只从配置指定的环境变量读取，禁止写入 YAML、日志、报告或仓库。
-- 真实委托必须按 candidate → validate-entry → draft → 用户确认 → place → query status → record 流程执行。
-- 超时后只查询状态，不盲目重试；客户端订单号用于防重复。
-- 所有输出仅供研究，不保证收益，不构成投资建议。
+- 实时分析和回测共用 `evaluate_setup_at_time`。
+- 历史评估只读取当时已经收盘的 K 线；候选只在下一根计划周期 K 线开盘验证。
+- `fetch-dataset --start` 按 Binance 的公开 K 线分页从指定 UTC 日期开始下载；回放窗口仍使用与实时获取一致的每周期 `history_limit`，避免历史评估获得实时调用看不到的额外数据。
+- 多周期候选先统一按入场时间排序，再使用一个不重叠的现金账户依次定仓；不同周期的循环顺序不会影响较早交易的权益。
+- 六种策略独立检测并保留失败原因，不再选择“第一个已启用策略”。
+- BTC Profile 的策略开关可由固定历史归因审查，但不会自动套用到其他资产；任何配置更新都必须再经过独立日期切分验证，不能为了单段历史收益自动调参。
+- 候选必须有结构确认，辅助指标不能单独触发信号。
+- 每个周期都会给出 EMA、SMA（MA）、RSI 和 MACD 的独立状态、数值、一致性票数与合成偏向；超买或超卖只是观察，不能单独触发交易。
+- 双顶、双底、头肩顶、倒头肩底和收敛三角突破由已收盘 K 线与 ATR 尺寸规则识别；只有颈线或边界有效突破才是确认，形成中的形态只作观察。已确认的看空形态会抑制多头候选，不会自动产生做空指令。
+- 入场范围由结构止损、可靠目标、最低盈亏比和允许偏差反推。
+- 同一根 K 线同时触发止损和止盈时，回测默认先止损。
+- 缺失辅助数据不会伪造中性分，而是降低数据完整度和置信度上限。
 
-迁移说明见 [MIGRATION-v0.2.0.md](MIGRATION-v0.2.0.md)，详细规则见 `references/`。
+配置合并顺序：代码默认 < `config/default.yaml` < Profile 配置 < 用户配置 < CLI 覆盖。详细规则见 `references/`，迁移说明见 [MIGRATION-v0.3.0.md](MIGRATION-v0.3.0.md)。
+
+所有结果仅供研究，不保证收益，不构成投资建议。

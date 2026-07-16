@@ -1,9 +1,11 @@
-# Asset profiles
+# Asset Profiles
 
-- BTC: weekly/daily emphasis; dominance, funding, open interest, liquidations, ETF flow and macro context; wider stops and stricter chasing.
-- ETH: ETH/BTC, gas, staking, ETF, on-chain and BTC context.
-- BNB: BNB/BTC, Binance platform risk, Launchpool and chain activity. Severe Binance platform risk is a hard filter.
-- SOL: SOL/BTC, SOL/ETH, on-chain, network health, ecosystem/memecoin activity, funding and open interest. Severe network events are a hard filter; sizing is lower and stops wider.
-- Generic: listing/pair status, data sufficiency, liquidity, spread and ATR. Confidence is capped and size reduced; unsupported symbols never block supported assets.
+Every Profile implements context evaluation, score adjustment, hard filters, strategy filtering, parameter adjustment and risk adjustment.
 
-`auto` selection is deterministic. A user may force a profile, but the report records the selected profile.
+- BTC emphasizes weekly/daily structure. Crowded positive funding plus open-interest expansion reduces confidence; ETF outflows and macro risk affect swing/long plans; liquidation context is secondary only.
+- ETH combines ETH/BTC, BTC context, gas, staking, ETF flow and on-chain activity. Relative weakness or conflicting BTC context reduces confidence and risk.
+- BNB prioritizes support rebound and range/breakout structure. Severe Binance platform risk is a hard filter; Launchpool activity never creates a signal alone.
+- SOL uses wider structural buffers, stricter volume/breakout requirements and lower risk suggestions. Severe network status is a hard filter; SOL/BTC and SOL/ETH confirmation strengthens relative score.
+- Generic verifies pair/listing context, data integrity, liquidity, spread and volatility where supplied. It has limited confidence and does not borrow dedicated-asset rules.
+
+Unavailable context is reported, not fabricated. Callers may provide external context as typed JSON data points.

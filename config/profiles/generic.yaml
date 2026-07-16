@@ -1,5 +1,7 @@
 profile: generic
 strategy:
-  entry_confidence: 72
-risk:
-  maximum_position_fraction: 0.15
+  candidate_confidence: 72
+horizons:
+  short_risk: 0.002
+  swing_risk: 0.003
+  long_risk: 0.002

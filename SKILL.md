@@ -1,40 +1,41 @@
 ---
 name: crypto-strategy-analyst
-description: Analyze any Binance spot pair with BTC/ETH/BNB/SOL asset profiles, independent short/swing/long plans, no-lookahead backtests, paper portfolio, manual journal, and an opt-in human-confirmed Spot adapter.
-metadata: {"openclaw":{"emoji":"📊","homepage":"https://github.com/nvnmvm/crypto-strategy-analyst","requires":{"bins":["python3"]}}}
+description: Analyze caller-selected crypto markets with dedicated BTC/ETH/BNB/SOL profiles, independent short/swing/long plans, strict historical replay, entry validation, research diagnostics, and OpenClaw events.
 ---
 
 # Crypto Strategy Analyst
 
-Use this Skill for public-market analysis, cross-asset comparison, deterministic historical replay, a local paper account, or a manual trade journal. OpenClaw chooses symbols, frequency and message delivery. This Skill never schedules itself and never sends Telegram messages.
+Use this Skill when OpenClaw needs public-market structure, key levels, near-level alerts, candidate plans, immutable next-bar validation, historical replay, or strategy research for caller-selected symbols.
 
-## Required workflow
+OpenClaw owns symbol selection, scheduling, alert deduplication, follow-up timing and message delivery. This Skill does not schedule itself or send messages.
 
-1. Verify Python 3.11+ and package availability. If missing, ask the operator to install this directory; do not silently install dependencies.
-2. Select `auto` unless the user explicitly overrides the profile. Auto maps BTC, ETH, BNB and SOL to dedicated profiles and every other symbol to `generic`.
-3. Require closed spot candles, current price, trading rules, timestamp and volume. Missing required data means `no_trade`; missing important auxiliary context lowers confidence; background data is `not_available`.
-4. Call the same `evaluate_setup_at_time` engine for live and historical work. Never expose a candle whose close time is later than the evaluation time.
-5. Report separate short (4h/1h/optional 15m), swing (1d/4h/1h), and long (1w/1d/4h) plans. Preserve hard filters even when the score is high.
-6. Never place a target through key resistance. If resistance leaves less than 2R, return `watch` or `no_trade`; if TP2 is not honest, downgrade instead of inventing 3R.
-7. Return schema 2.0 JSON or concise Chinese Markdown with profile, market, data availability, component scores, confidence, levels, relative strength, plans, events, warnings and limitations.
-8. State that output is research only, is not a profit guarantee, and is not investment advice.
+## Workflow
+
+1. Use `--profile auto` unless the caller explicitly overrides it. BTC, ETH, BNB and SOL use dedicated Profiles; every other symbol uses Generic with limited confidence.
+2. Require completed 1w, 1d, 4h and 1h candles plus public trading rules. Missing required data forces `no_trade`.
+3. Treat missing derivatives, relative-strength, macro, ETF or on-chain context as `not_available`; never replace it with a neutral score.
+4. Call the shared `evaluate_setup_at_time` path for current and historical analysis. Never expose a candle closed after the evaluation time.
+5. Keep short, swing and long plans independent. A strategy name may appear only when its detector actually matches.
+6. Require at least one structural confirmation. RSI, funding, flows or chain activity are secondary evidence only.
+   Double bottoms, inverse head-and-shoulders, their bearish counterparts and compressed-triangle breakouts are deterministic swing/ATR patterns: require a completed neckline/boundary break, never promote a forming pattern to a candidate, and treat confirmed bearish patterns as a long-risk filter rather than a short order.
+7. Respect structural stops, resistance-aware targets and the configured minimum reward/risk. Downgrade insufficient space to `watch`.
+8. Return schema 3.0 JSON or concise Chinese Markdown, including data availability, scores, levels, horizon plans, warnings, limitations and OpenClaw events.
+   Include the per-timeframe `market.technical_analysis` panel: EMA/SMA alignment, RSI state, MACD line/signal/histogram state, confluence score and directional votes. Treat overbought/oversold as observations, never standalone orders.
+9. For low-token technical-only requests, call `analyze --technical-only`. Fetch public Binance candles once per timeframe, calculate EMA/MA/RSI/MACD/ATR and volume internally, and return only the final closed-candle snapshot. Do not add auxiliary data, patterns, levels, raw candles, price plans, or execution.
 
 ## Commands
 
 ```bash
-crypto-strategy-analyst analyze BTC/USDT --profile auto --format json
-crypto-strategy-analyst compare BTC/USDT ETH/USDT BNB/USDT SOL/USDT
-crypto-strategy-analyst fetch-dataset BTC/USDT ./data/btc.json
-crypto-strategy-analyst backtest ./data/btc.json --profile auto
-crypto-strategy-analyst validate-entry ./outputs/report.json --horizon swing
-crypto-strategy-analyst portfolio show
-crypto-strategy-analyst journal list
+crypto-strategy-analyst analyze BTC/USDT --horizons short swing long --format json
+crypto-strategy-analyst analyze BTC/USDT --technical-only --format markdown
+crypto-strategy-analyst compare BTC/USDT ETH/USDT SOL/USDT
+crypto-strategy-analyst validate-entry ./outputs/BTC-USDT-report.json --dataset ./data/BTC-USDT --horizon swing
+crypto-strategy-analyst fetch-dataset BTC/USDT ./data/BTC-USDT
+crypto-strategy-analyst fetch-dataset BTC/USDT ./data/BTC-USDT-full --start 2017-08-01
+crypto-strategy-analyst backtest ./data/BTC-USDT
+crypto-strategy-analyst research diagnose ./data/BTC-USDT
 ```
 
-Read `{baseDir}/references/analysis-engine.md`, `{baseDir}/references/asset-profiles.md`, `{baseDir}/references/risk-and-execution.md`, and `{baseDir}/references/backtesting.md` when explaining or changing the rules.
+Read `{baseDir}/references/analysis-engine.md`, `{baseDir}/references/asset-profiles.md`, `{baseDir}/references/strategies.md`, `{baseDir}/references/data-sources.md`, and `{baseDir}/references/backtesting.md` when explaining or changing rules.
 
-## Real-order boundary
-
-Real Binance Spot access is optional and disabled by default. Never ask a user to paste credentials. Keys must be in the configured environment variables. Futures, margin, leverage, short selling, transfers and withdrawals are unsupported.
-
-Only continue from `exchange draft` to `exchange place` after OpenClaw shows the complete draft and the user explicitly confirms it. Enforce testnet-first, whitelist, notional/risk limits, price-deviation limits, expiring one-time confirmation tokens, client order IDs, duplicate checks, status checks and emergency stop. On timeout, query status and do not blindly retry.
+Research output is not a profit guarantee or investment advice.

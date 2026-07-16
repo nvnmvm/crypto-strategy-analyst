@@ -1,9 +1,26 @@
 # Analysis engine
 
-`evaluate_setup_at_time(snapshot, config, profile)` is the sole strategy evaluator. Live analysis and replay both call it. `MarketSnapshot.completed(timeframe)` excludes every bar with `close_time > as_of`.
+`evaluate_setup_at_time` is the sole strategy entry point for current analysis and historical replay. A `MarketSnapshot` exposes only candles whose `close_time <= as_of`; future auxiliary observations are also excluded.
 
-The engine emits independent `short`, `swing`, and `long` plans and the statuses `no_trade`, `watch`, `near_key_level`, `candidate`, `entry_validated`, `entry_cancelled`, `position_management`, `exit_signal`, and `risk_alert`. Component scores are technical, derivatives, on-chain, macro, relative strength, and asset-specific. Scores never bypass required-data or asset hard filters.
+The engine calculates EMA, RSI, MACD histogram, ATR, volume ratio and trend strength; classifies `strong_bull`, `bullish`, `bull_pullback`, `range`, `bearish`, `capitulation` or `recovery`; constructs multi-source price zones; evaluates every enabled strategy independently; then produces separate short, swing and long plans.
 
-Support/resistance candidates are pivot clusters. Adjacent touches inside the configured cooldown count once; merged multi-timeframe levels keep the strongest representation instead of adding the same price action repeatedly.
+Market regime changes allowed strategies, confidence, minimum reward/risk and risk suggestions. Scores rank and explain plans but cannot bypass missing required data, absent structural confirmation, hard Profile filters, invalid stops or insufficient target space.
 
-Targets respect both R multiples and observed resistance. Less than 2R room is not tradable. TP2 may be absent, but then the signal is downgraded; the engine never fabricates a 3R target.
+Missing auxiliary data is represented by `null` component scores. Data completeness constrains confidence rather than silently assigning a neutral 50.
+# Analysis engine
+
+## Chart-pattern rules
+
+The engine recognizes five compact patterns: double bottom, double top, inverse
+head-and-shoulders, head-and-shoulders and a confirmed compressed-triangle breakout.
+Detection is swing based, uses a fixed ATR-scaled tolerance for comparable highs/lows,
+and reads completed candles only.
+
+- `forming` means the geometry exists but price has not closed through its neckline.
+- `confirmed` requires a completed close beyond the neckline by 0.3 ATR.
+- `invalidated` means price crossed the structural invalidation point before confirmation.
+
+Bullish confirmed patterns may add a structural confirmation, but never replace trend,
+target-space, stop or reward/risk checks. Confirmed bearish patterns create a risk alert
+and suppress long candidates. The Skill remains analysis-only and does not create short
+orders.

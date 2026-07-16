@@ -1,4 +1,4 @@
-"""Public schema v2.0 shared by live analysis, backtests and adapters."""
+"""Version 3 public models for analysis, replay and OpenClaw events."""
 
 from __future__ import annotations
 
@@ -11,18 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class SignalStatus(StrEnum):
-    NO_TRADE = "no_trade"
-    WATCH = "watch"
-    NEAR_KEY_LEVEL = "near_key_level"
-    CANDIDATE = "candidate"
-    ENTRY_VALIDATED = "entry_validated"
-    ENTRY_CANCELLED = "entry_cancelled"
-    POSITION_MANAGEMENT = "position_management"
-    EXIT_SIGNAL = "exit_signal"
-    RISK_ALERT = "risk_alert"
 
 
 class Availability(StrEnum):
@@ -38,13 +26,23 @@ class Horizon(StrEnum):
     LONG = "long"
 
 
-class DataPoint(StrictModel):
-    status: Availability
-    source: str
-    observed_at: datetime | None = None
-    freshness_seconds: float | None = Field(default=None, ge=0)
-    value: Any = None
-    detail: str | None = None
+class MarketRegime(StrEnum):
+    STRONG_BULL = "strong_bull"
+    BULLISH = "bullish"
+    BULL_PULLBACK = "bull_pullback"
+    RANGE = "range"
+    BEARISH = "bearish"
+    CAPITULATION = "capitulation"
+    RECOVERY = "recovery"
+
+
+class SignalStatus(StrEnum):
+    NO_TRADE = "no_trade"
+    WATCH = "watch"
+    NEAR_KEY_LEVEL = "near_key_level"
+    CANDIDATE = "candidate"
+    ENTRY_VALIDATED = "entry_validated"
+    ENTRY_CANCELLED = "entry_cancelled"
 
 
 class Candle(StrictModel):
@@ -57,122 +55,228 @@ class Candle(StrictModel):
     volume: float = Field(ge=0)
 
     @model_validator(mode="after")
-    def valid_range(self) -> Candle:
-        if self.high < max(self.open, self.close, self.low):
-            raise ValueError("high is below candle range")
-        if self.low > min(self.open, self.close, self.high):
-            raise ValueError("low is above candle range")
+    def validate_ohlc(self) -> Candle:
         if self.close_time <= self.open_time:
             raise ValueError("close_time must follow open_time")
+        if self.high < max(self.open, self.close) or self.low > min(self.open, self.close):
+            raise ValueError("invalid OHLC range")
         return self
+
+
+class DataPoint(StrictModel):
+    status: Availability
+    source: str
+    observed_at: datetime | None = None
+    freshness_seconds: float | None = Field(default=None, ge=0)
+    value: Any = None
+    detail: str = ""
+
+    def usable_at(self, at: datetime) -> bool:
+        return self.status == Availability.AVAILABLE and (
+            self.observed_at is None or self.observed_at <= at
+        )
 
 
 class MarketSnapshot(StrictModel):
     symbol: str
+    exchange: str = "binance"
     as_of: datetime
     price: float = Field(gt=0)
     candles: dict[str, list[Candle]]
     trading_rules: DataPoint
-    timestamp: DataPoint
-    volume: DataPoint
     auxiliary: dict[str, DataPoint] = Field(default_factory=dict)
 
     def completed(self, timeframe: str) -> list[Candle]:
-        """Return only bars closed by as_of; this is the no-lookahead boundary."""
         return [bar for bar in self.candles.get(timeframe, []) if bar.close_time <= self.as_of]
 
 
-class ComponentScores(StrictModel):
-    technical: float = Field(ge=0, le=100)
-    derivatives: float = Field(ge=0, le=100)
-    onchain: float = Field(ge=0, le=100)
-    macro: float = Field(ge=0, le=100)
-    relative_strength: float = Field(ge=0, le=100)
-    asset_specific: float = Field(ge=0, le=100)
+class IndicatorSet(StrictModel):
+    close: float
+    ema20: float
+    ema50: float
+    ema200: float
+    sma_fast: float
+    sma_medium: float
+    sma_slow: float
+    ema20_slope: float
+    rsi: float = Field(ge=0, le=100)
+    macd_line: float
+    macd_signal: float
+    macd_histogram: float
+    macd_histogram_change: float
+    atr: float = Field(gt=0)
+    atr_percent: float = Field(ge=0)
+    volume_ratio: float = Field(ge=0)
+    trend_strength: float = Field(ge=0, le=100)
 
 
-class PriceLevel(StrictModel):
-    kind: Literal["support", "resistance"]
-    price: float = Field(gt=0)
+class KeyLevel(StrictModel):
+    type: Literal["support", "resistance"]
+    lower: float = Field(gt=0)
+    upper: float = Field(gt=0)
+    midpoint: float = Field(gt=0)
     timeframe: str
     strength: float = Field(ge=0, le=100)
     touches: int = Field(ge=1)
+    last_reaction_at: datetime
+    sources: list[str]
+    distance_percent: float
+    distance_atr: float
+
+
+class ScoreCard(StrictModel):
+    technical: float = Field(ge=0, le=100)
+    derivatives: float | None = Field(default=None, ge=0, le=100)
+    onchain: float | None = Field(default=None, ge=0, le=100)
+    macro: float | None = Field(default=None, ge=0, le=100)
+    relative_strength: float | None = Field(default=None, ge=0, le=100)
+    asset_specific: float | None = Field(default=None, ge=0, le=100)
+    data_completeness: float = Field(ge=0, le=100)
+    confidence: float = Field(ge=0, le=100)
+
+
+class PriceRange(StrictModel):
+    lower: float = Field(gt=0)
+    upper: float = Field(gt=0)
+
+
+class TakeProfit(StrictModel):
+    price: float = Field(gt=0)
+    fraction: float = Field(gt=0, le=1)
+    source: str
+
+
+class RiskSuggestion(StrictModel):
+    level: Literal["none", "low", "reduced", "normal"]
+    risk_fraction: float = Field(ge=0, le=0.03)
+    rationale: list[str] = Field(default_factory=list)
+
+
+class StrategyMatch(StrictModel):
+    strategy: str
+    matched: bool
+    structure_confirmations: list[str]
+    secondary_confirmations: list[str]
+    failed_conditions: list[str]
+    entry_range: PriceRange | None = None
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profits: list[TakeProfit] = Field(default_factory=list)
+    reward_risk: float | None = Field(default=None, ge=0)
+    invalidation_conditions: list[str] = Field(default_factory=list)
 
 
 class HorizonPlan(StrictModel):
     horizon: Horizon
     status: SignalStatus
-    direction: Literal["long", "flat"] = "flat"
-    strategy: str
-    timeframes: list[str]
-    entry: float | None = Field(default=None, gt=0)
-    stop: float | None = Field(default=None, gt=0)
-    take_profit_1: float | None = Field(default=None, gt=0)
-    take_profit_2: float | None = Field(default=None, gt=0)
-    reward_risk_1: float | None = Field(default=None, ge=0)
-    reward_risk_2: float | None = Field(default=None, ge=0)
-    position_fraction: float = Field(default=0, ge=0, le=1)
-    reasons: list[str] = Field(default_factory=list)
-    invalidation: list[str] = Field(default_factory=list)
+    market_regime: MarketRegime
+    strategy: str | None = None
+    key_levels: list[KeyLevel] = Field(default_factory=list)
+    entry_range: PriceRange | None = None
+    planned_entry: float | None = Field(default=None, gt=0)
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profits: list[TakeProfit] = Field(default_factory=list)
+    reward_risk: float | None = Field(default=None, ge=0)
+    minimum_reward_risk: float | None = Field(default=None, ge=0)
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    structure_confirmations: list[str] = Field(default_factory=list)
+    secondary_confirmations: list[str] = Field(default_factory=list)
+    failed_conditions: list[str] = Field(default_factory=list)
+    invalidation_conditions: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=100)
+    risk_suggestion: RiskSuggestion
+    strategy_results: list[StrategyMatch] = Field(default_factory=list)
 
 
-class AnalysisEvent(StrictModel):
+class OpenClawEvent(StrictModel):
     event_id: str
-    event_type: SignalStatus
+    event_type: Literal[
+        "analysis_completed",
+        "near_key_level",
+        "candidate_created",
+        "entry_validated",
+        "entry_cancelled",
+        "risk_alert",
+        "data_failure",
+        "profile_warning",
+    ]
+    severity: Literal["info", "warning", "critical"]
     symbol: str
-    horizon: Horizon
+    profile: str
+    horizon: Horizon | None = None
     occurred_at: datetime
+    deduplication_key: str
+    expires_at: datetime | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnalysisReport(StrictModel):
-    schema_version: Literal["2.0"] = "2.0"
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    schema_version: Literal["3.0"] = "3.0"
+    report_id: str
+    symbol: str
     profile: str
+    profile_confidence: Literal["dedicated", "limited"] = "dedicated"
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    evaluation_time: datetime
     market: dict[str, Any]
     data_availability: dict[str, DataPoint]
-    scores: ComponentScores
+    scores: ScoreCard
     confidence: float = Field(ge=0, le=100)
-    key_levels: list[PriceLevel]
-    relative_strength: dict[str, float | str]
-    plans: dict[Horizon, HorizonPlan]
-    events: list[AnalysisEvent]
-    chart_data: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    key_levels: dict[Literal["supports", "resistances"], list[KeyLevel]]
+    relative_strength: dict[str, Any]
+    horizons: dict[Horizon, HorizonPlan]
+    events: list[OpenClawEvent]
     warnings: list[str]
     limitations: list[str]
     hard_filters: list[str] = Field(default_factory=list)
 
 
-class OrderDraft(StrictModel):
-    draft_id: str
+class EntryValidation(StrictModel):
+    report_id: str
+    horizon: Horizon
+    status: SignalStatus
+    validation_time: datetime
+    actual_open_price: float | None = Field(default=None, gt=0)
+    original_entry_range: PriceRange | None = None
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profits: list[TakeProfit] = Field(default_factory=list)
+    reward_risk_at_open: float | None = Field(default=None, ge=0)
+    reasons: list[str]
+    event: OpenClawEvent | None = None
+
+
+class BacktestTrade(StrictModel):
     symbol: str
-    side: Literal["BUY", "SELL"]
-    order_type: Literal["MARKET", "LIMIT"]
-    quantity: float = Field(gt=0)
-    limit_price: float | None = Field(default=None, gt=0)
-    reference_price: float = Field(gt=0)
-    notional: float = Field(gt=0)
-    client_order_id: str
-    created_at: datetime
-    expires_at: datetime
-    confirmation_digest: str
+    profile: str
+    horizon: Horizon
+    strategy: str
+    regime: MarketRegime
+    planned_at: datetime
+    entry_time: datetime
+    exit_time: datetime
+    entry_price: float
+    exit_price: float
+    quantity: float
+    pnl: float
+    return_fraction: float
+    r_multiple: float
+    confidence: float = Field(ge=0, le=100)
+    fees: float
+    holding_hours: float
+    mfe: float
+    mae: float
+    exit_reason: str
 
 
-class OrderResult(StrictModel):
-    order_id: str
-    client_order_id: str
+class BacktestResult(StrictModel):
     symbol: str
-    status: str
-    executed_quantity: float = Field(ge=0)
-    average_price: float | None = Field(default=None, gt=0)
-    raw_status: dict[str, Any] = Field(default_factory=dict)
-
-
-class PaperAccount(StrictModel):
-    schema_version: Literal[1] = 1
-    quote_currency: str = "USDT"
-    cash: float = Field(default=600, ge=0)
-    peak_equity: float = Field(default=600, ge=0)
-    positions: dict[str, float] = Field(default_factory=dict)
-    realized_pnl: float = 0
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    generated_at: datetime
+    metrics: dict[str, Any]
+    benchmarks: dict[str, Any]
+    time_splits: dict[str, Any]
+    rolling_windows: list[dict[str, Any]]
+    trades: list[BacktestTrade]
+    candidate_funnel: dict[str, int]
+    blockers: dict[str, int]
+    cancellations: dict[str, int]
+    assumptions: dict[str, Any]

@@ -1,7 +1,13 @@
-# Backtesting
+# Backtesting and research
 
-Backtests replay 4h decision times and call the same public evaluator as current analysis. At each timestamp, 1w, 1d, 4h, 1h and optional 15m inputs are cropped to already-closed bars. Tests compare live and replay output at the same historical timestamp and inject future spikes to detect leakage.
+The strict replay sequence is: primary timeframe close → shared analysis engine → candidate → next primary bar actual open validation → fill or cancellation → subsequent OHLC evaluation.
 
-Default cost assumptions are 10 bps fee and 5 bps one-way slippage. Entries and exits use conservative adverse slippage. The 60%/20%/20% chronological report field is named `time_splits`; it is not described as walk-forward. The `research walk-forward` command is a diagnostic surface and does not automatically optimize parameters.
+Validation never moves the original stop, targets or entry range. It cancels expired plans, out-of-range opens, opens beyond stop/target, low reward/risk or new hard risk.
 
-Backtests are research evidence, not a profit forecast. A small trade count, missing delisted-symbol history, survivor bias, external-data gaps, venue changes and simplified fill logic must be disclosed.
+Replay handles adverse fees/slippage, gap cancellation, partial targets, optional break-even stop after TP1, time exits and end-of-data closure. If a bar touches stop and target without lower-timeframe ordering evidence, stop is applied first.
+
+Time splits use configured calendar dates. Data through 2026-07-01 is labeled historical replay, not a pristine unseen test set. Post-freeze observations are separated for genuine forward validation.
+
+Research commands return real candidate funnels, grouped attribution, component/strategy ablation, frozen-parameter rolling windows, cost scenarios, parameter neighborhoods and a finite preregistered configuration comparison. They do not optimize parameters automatically.
+
+Metrics include return, annualized return, drawdown, trade count, win rate, win/loss averages, payoff, expectancy R, Profit Factor, Sharpe, Sortino, Calmar, fees, holding time, MFE, MAE and concentration. Fewer than the configured minimum trades is marked `sample_size_insufficient`.

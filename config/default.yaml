@@ -1,44 +1,63 @@
-config_version: 2
+config_version: 3
 profile: auto
+indicators:
+  ema_fast: 20
+  ema_medium: 50
+  ema_slow: 200
+  sma_fast: 20
+  sma_medium: 50
+  sma_slow: 200
+  atr_period: 14
+  rsi_period: 14
+  volume_period: 20
+levels:
+  swing_window: 3
+  merge_atr: 0.45
+  zone_atr: 0.18
+  touch_cooldown_bars: 6
+  reaction_atr: 0.5
+  break_atr: 0.3
+  near_percent: 0.012
+  near_atr: 0.8
 strategy:
   support_rebound: true
   breakout_retest: true
   trend_pullback: true
   range_reversal: true
-  bear_reversal: false
+  bear_reversal: true
   bear_accumulation: false
-  minimum_confidence: 58
-  entry_confidence: 68
-  minimum_reward_risk: 2
-  touch_cooldown_bars: 6
-  level_tolerance_atr: 0.35
-risk:
-  account_equity: 600
-  risk_per_trade: 0.01
-  maximum_position_fraction: 0.30
-  maximum_order_notional: 200
-  maximum_daily_loss: 0.03
-  maximum_drawdown: 0.15
-trading:
-  trading_enabled: false
-  futures_enabled: false
-  require_human_confirmation: true
-  testnet: true
-  symbol_whitelist: [BTCUSDT, ETHUSDT]
-  api_key_env: BINANCE_API_KEY
-  api_secret_env: BINANCE_API_SECRET
-  maximum_price_deviation: 0.01
-  confirmation_ttl_seconds: 120
-  request_timeout_seconds: 10
-  emergency_stop: false
+  minimum_confidence: 52
+  candidate_confidence: 65
+  volume_ratio: 1.15
+  breakout_atr: 0.3
+  pullback_minimum: 0.03
+  bear_drawdown: 0.22
+  entry_deviation_atr: 0.25
+  stop_buffer_atr: 0.25
+  validity_bars: 2
+horizons:
+  short_minimum_r: 1.5
+  swing_minimum_r: 1.8
+  long_minimum_r: 2.0
+  short_risk: 0.005
+  swing_risk: 0.008
+  long_risk: 0.006
 data:
   exchange: binance
   timeframes: [1w, 1d, 4h, 1h]
   history_limit: 500
-  stale_after_seconds: 600
-storage:
-  state_dir: state
+  stale_after_seconds: 900
+  request_timeout_seconds: 15
+research:
+  train_end: 2021-12-31
+  validation_end: 2023-12-31
+  historical_replay_end: 2026-07-01
+  fee_rate: 0.001
+  slippage_rate: 0.0005
+  starting_equity: 600
+  minimum_trades: 30
+  time_exit_bars: 30
+  rolling_days: 365
+  move_stop_to_breakeven_after_tp1: true
+output:
   output_dir: outputs
-  paper_account_file: state/paper-account.json
-  paper_trades_file: state/paper-trades.jsonl
-  journal_file: state/manual-journal.jsonl

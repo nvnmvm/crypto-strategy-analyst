@@ -1,5 +1,12 @@
 profile: sol
+levels:
+  zone_atr: 0.22
 strategy:
-  entry_confidence: 72
-risk:
-  maximum_position_fraction: 0.18
+  candidate_confidence: 69
+  volume_ratio: 1.30
+  breakout_atr: 0.45
+  stop_buffer_atr: 0.35
+horizons:
+  short_risk: 0.003
+  swing_risk: 0.005
+  long_risk: 0.004
