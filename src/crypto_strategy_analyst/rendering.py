@@ -43,6 +43,21 @@ def report_markdown(report: AnalysisReport) -> str:
                 else "暂无可靠点位"
             )
         )
+    lines += ["", "## 技术指标", ""]
+    technical = report.market.get("technical_analysis", {})
+    for timeframe, reading in technical.items():
+        ema = reading["ema"]
+        sma = reading["sma"]
+        rsi = reading["rsi"]
+        macd = reading["macd"]
+        lines.append(
+            f"- {timeframe}：偏向 `{reading['bias']}`（一致性{reading['confluence_score']:.0f}/100；"
+            f"多/空票 {reading['bullish_votes']}/{reading['bearish_votes']}）；"
+            f"EMA {ema['state']}；MA {sma['state']}；RSI({rsi['period']}) "
+            f"{rsi['value']:.1f}（{rsi['state']}）；MACD {macd['state']}。"
+        )
+    if not technical:
+        lines.append("K 线不足，无法计算 RSI、MACD、EMA 与 MA。")
     lines += ["", "## 结构形态", ""]
     chart_patterns = report.market.get("chart_patterns", {})
     rendered_patterns = []

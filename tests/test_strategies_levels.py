@@ -41,9 +41,15 @@ def pattern_indicator(atr: float = 2) -> IndicatorSet:
         ema20=100,
         ema50=100,
         ema200=100,
+        sma_fast=100,
+        sma_medium=100,
+        sma_slow=100,
         ema20_slope=0,
         rsi=50,
+        macd_line=0,
+        macd_signal=0,
         macd_histogram=0,
+        macd_histogram_change=0,
         atr=atr,
         atr_percent=2,
         volume_ratio=1,
@@ -189,6 +195,10 @@ def test_indicator_ranges(snapshot_factory, period):
     result = calculate_indicators(snapshot_factory().candles["1d"], config)
     assert 0 <= result.rsi <= 100
     assert result.atr > 0
+    assert result.sma_fast > 0
+    assert result.sma_medium > 0
+    assert result.sma_slow > 0
+    assert result.macd_line - result.macd_signal == pytest.approx(result.macd_histogram)
 
 
 @pytest.mark.parametrize(

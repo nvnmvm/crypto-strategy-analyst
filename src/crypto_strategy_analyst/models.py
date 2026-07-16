@@ -95,9 +95,15 @@ class IndicatorSet(StrictModel):
     ema20: float
     ema50: float
     ema200: float
+    sma_fast: float
+    sma_medium: float
+    sma_slow: float
     ema20_slope: float
     rsi: float = Field(ge=0, le=100)
+    macd_line: float
+    macd_signal: float
     macd_histogram: float
+    macd_histogram_change: float
     atr: float = Field(gt=0)
     atr_percent: float = Field(ge=0)
     volume_ratio: float = Field(ge=0)

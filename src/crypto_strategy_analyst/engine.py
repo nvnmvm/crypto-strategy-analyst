@@ -29,6 +29,7 @@ from .profiles.registry import get_profile
 from .regime import classify_regime
 from .strategies import StrategyContext, evaluate_strategies
 from .structure import ChartPattern, detect_chart_patterns
+from .technical_analysis import analyze_indicators
 
 HORIZON_FRAMES = {
     Horizon.SHORT: ("4h", "1h", "15m"),
@@ -469,6 +470,7 @@ def _assemble_report(
     hard_filters,
     report_id,
     chart_patterns,
+    technical_analysis,
 ) -> AnalysisReport:
     primary_regime = plans[Horizon.SWING].market_regime
     return AnalysisReport(
@@ -490,6 +492,7 @@ def _assemble_report(
                 timeframe: [pattern.as_dict() for pattern in patterns]
                 for timeframe, patterns in chart_patterns.items()
             },
+            "technical_analysis": technical_analysis,
         },
         data_availability=availability,
         scores=score,
@@ -522,6 +525,7 @@ def evaluate_setup_at_time(
     profile = get_profile(profile_name, snapshot.symbol)
     completed = {timeframe: snapshot.completed(timeframe) for timeframe in snapshot.candles}
     indicators = indicator_map(completed, config.indicators)
+    technical_analysis = analyze_indicators(indicators, config.indicators)
     chart_patterns = {
         timeframe: detect_chart_patterns(completed[timeframe], indicator)
         for timeframe, indicator in indicators.items()
@@ -573,6 +577,7 @@ def evaluate_setup_at_time(
         hard_filters,
         _report_id(snapshot, completed),
         chart_patterns,
+        technical_analysis,
     )
 
 

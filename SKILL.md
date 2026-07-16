@@ -20,6 +20,7 @@ OpenClaw owns symbol selection, scheduling, alert deduplication, follow-up timin
    Double bottoms, inverse head-and-shoulders, their bearish counterparts and compressed-triangle breakouts are deterministic swing/ATR patterns: require a completed neckline/boundary break, never promote a forming pattern to a candidate, and treat confirmed bearish patterns as a long-risk filter rather than a short order.
 7. Respect structural stops, resistance-aware targets and the configured minimum reward/risk. Downgrade insufficient space to `watch`.
 8. Return schema 3.0 JSON or concise Chinese Markdown, including data availability, scores, levels, horizon plans, warnings, limitations and OpenClaw events.
+   Include the per-timeframe `market.technical_analysis` panel: EMA/SMA alignment, RSI state, MACD line/signal/histogram state, confluence score and directional votes. Treat overbought/oversold as observations, never standalone orders.
 
 ## Commands
 

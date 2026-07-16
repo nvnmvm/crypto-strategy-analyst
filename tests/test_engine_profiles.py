@@ -7,6 +7,7 @@ from crypto_strategy_analyst.config import AppConfig
 from crypto_strategy_analyst.engine import analyze_snapshot
 from crypto_strategy_analyst.models import Availability, DataPoint, Horizon, SignalStatus
 from crypto_strategy_analyst.profiles.registry import get_profile, profile_for_symbol
+from crypto_strategy_analyst.rendering import report_markdown
 from crypto_strategy_analyst.structure import ChartPattern
 
 
@@ -37,6 +38,28 @@ def test_report_schema_horizons_and_events(snapshot_factory):
     assert any(event.event_type == "analysis_completed" for event in report.events)
     assert report.scores.data_completeness < 100
     assert report.scores.derivatives is None
+
+
+def test_report_exposes_explainable_technical_indicator_panel(snapshot_factory):
+    report = analyze_snapshot(snapshot_factory(), AppConfig())
+    daily = report.market["technical_analysis"]["1d"]
+    assert set(daily) == {
+        "bias",
+        "confluence_score",
+        "bullish_votes",
+        "bearish_votes",
+        "ema",
+        "sma",
+        "rsi",
+        "macd",
+    }
+    assert daily["ema"]["periods"] == [20, 50, 200]
+    assert daily["sma"]["periods"] == [20, 50, 200]
+    assert 0 <= daily["rsi"]["value"] <= 100
+    assert daily["macd"]["line"] - daily["macd"]["signal"] == pytest.approx(
+        daily["macd"]["histogram"]
+    )
+    assert "## 技术指标" in report_markdown(report)
 
 
 def test_future_candle_does_not_change_report(snapshot_factory):

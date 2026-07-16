@@ -4,6 +4,9 @@ indicators:
   ema_fast: 20
   ema_medium: 50
   ema_slow: 200
+  sma_fast: 20
+  sma_medium: 50
+  sma_slow: 200
   atr_period: 14
   rsi_period: 14
   volume_period: 20
