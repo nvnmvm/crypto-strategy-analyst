@@ -26,6 +26,7 @@ python -m build
 
 ```bash
 crypto-strategy-analyst analyze BTC/USDT --profile auto --horizons short swing long --format json
+crypto-strategy-analyst analyze BTC/USDT --technical-only --format markdown
 crypto-strategy-analyst compare BTC/USDT ETH/USDT BNB/USDT SOL/USDT
 crypto-strategy-analyst validate-entry outputs/BTC-USDT-report.json --dataset data/BTC-USDT --horizon swing
 crypto-strategy-analyst fetch-dataset BTC/USDT data/BTC-USDT
@@ -34,7 +35,7 @@ crypto-strategy-analyst backtest data/BTC-USDT --horizons short swing long
 crypto-strategy-analyst research diagnose data/BTC-USDT
 ```
 
-`analyze` 同时支持 `--symbol BTC/USDT`、离线 `--dataset`、调用者提供的 `--external-data`、`--output-dir` 和 Markdown 输出。`compare` 只比较调用者传入的币种，不内置扫描列表。
+`analyze` 同时支持 `--symbol BTC/USDT`、离线 `--dataset`、调用者提供的 `--external-data`、`--output-dir` 和 Markdown 输出。`analyze --technical-only` 只请求 Binance 公共 K 线、在本地一次计算 EMA/MA/RSI/MACD/ATR/量能，并且只返回每周期最后的指标快照；它不请求辅助数据、不扫描形态或关键点位、不返回原始 K 线。EMA200 的预热数据仍在本地计算，不进入 OpenClaw 上下文。`compare` 只比较调用者传入的币种，不内置扫描列表。
 
 ## 分析规则
 

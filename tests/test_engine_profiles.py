@@ -9,6 +9,10 @@ from crypto_strategy_analyst.models import Availability, DataPoint, Horizon, Sig
 from crypto_strategy_analyst.profiles.registry import get_profile, profile_for_symbol
 from crypto_strategy_analyst.rendering import report_markdown
 from crypto_strategy_analyst.structure import ChartPattern
+from crypto_strategy_analyst.technical_snapshot import (
+    analyze_technical_snapshot,
+    technical_markdown,
+)
 
 
 @pytest.mark.parametrize(
@@ -44,6 +48,7 @@ def test_report_exposes_explainable_technical_indicator_panel(snapshot_factory):
     report = analyze_snapshot(snapshot_factory(), AppConfig())
     daily = report.market["technical_analysis"]["1d"]
     assert set(daily) == {
+        "close",
         "bias",
         "confluence_score",
         "bullish_votes",
@@ -52,6 +57,8 @@ def test_report_exposes_explainable_technical_indicator_panel(snapshot_factory):
         "sma",
         "rsi",
         "macd",
+        "atr",
+        "volume",
     }
     assert daily["ema"]["periods"] == [20, 50, 200]
     assert daily["sma"]["periods"] == [20, 50, 200]
@@ -60,6 +67,18 @@ def test_report_exposes_explainable_technical_indicator_panel(snapshot_factory):
         daily["macd"]["histogram"]
     )
     assert "## 技术指标" in report_markdown(report)
+
+
+def test_technical_only_snapshot_is_compact_and_uses_closed_candles(snapshot_factory):
+    baseline = snapshot_factory()
+    future = snapshot_factory(future_spike=True)
+    report = analyze_technical_snapshot(baseline, AppConfig())
+    assert report["analysis_scope"] == "technical_indicators_only"
+    assert set(report["timeframes"]) == {"1w", "1d", "4h", "1h"}
+    assert set(report["horizons"]) == {"short", "swing", "long"}
+    assert not {"candles", "key_levels", "chart_patterns", "auxiliary"}.intersection(report)
+    assert "## 周期指标" in technical_markdown(report)
+    assert report == analyze_technical_snapshot(future, AppConfig())
 
 
 def test_future_candle_does_not_change_report(snapshot_factory):

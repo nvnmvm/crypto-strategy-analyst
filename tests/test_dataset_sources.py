@@ -74,6 +74,22 @@ def test_binance_market_source():
     assert len(snapshot.candles["1h"]) == 25
 
 
+def test_binance_indicator_snapshot_uses_closed_klines_only():
+    rows = kline_rows(3)
+    as_of = datetime.fromtimestamp((rows[1][6] + 1) / 1000, UTC)
+
+    def router(url, params):
+        assert "klines" in url
+        return Response(rows)
+
+    snapshot = BinanceMarketData(client=Client(router)).indicator_snapshot(
+        "BTC/USDT", ["1h"], 3, as_of=as_of
+    )
+    assert len(snapshot.candles["1h"]) == 2
+    assert snapshot.price == 101
+    assert snapshot.trading_rules.status == Availability.NOT_AVAILABLE
+
+
 def test_binance_history_paginates_from_start_time():
     rows = kline_rows(1001)
     for row in rows:

@@ -10,7 +10,7 @@ from typing import Any
 
 from .backtest import run_backtest
 from .config import load_config
-from .data_sources import CompositeDataSource
+from .data_sources import BinanceMarketData, CompositeDataSource
 from .data_sources.composite import load_external_context
 from .dataset import load_dataset, save_dataset
 from .engine import analyze_snapshot
@@ -26,6 +26,7 @@ from .research import (
     parameter_stability,
     walk_forward,
 )
+from .technical_snapshot import analyze_technical_snapshot, technical_json, technical_markdown
 from .validation import validate_entry
 
 TOP_LEVEL_COMMANDS = (
@@ -60,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--external-data")
     analyze.add_argument("--output-dir")
     analyze.add_argument("--format", choices=("json", "markdown"), default="json")
+    analyze.add_argument(
+        "--technical-only",
+        action="store_true",
+        help="return compact EMA/MA/RSI/MACD/ATR analysis without patterns, levels, or auxiliary data",
+    )
 
     compare_parser = commands.add_parser("compare")
     _common(compare_parser)
@@ -140,14 +146,26 @@ def _save_report(report: AnalysisReport, output_dir: str | None, format_name: st
     (target / f"{safe}-report.{suffix}").write_text(content, encoding="utf-8")
 
 
-def _live_or_dataset(symbol: str, dataset: str | None, config, external: str | None = None):
+def _live_or_dataset(
+    symbol: str,
+    dataset: str | None,
+    config,
+    external: str | None = None,
+    technical_only: bool = False,
+):
     if config.data.exchange != "binance":
         raise ValueError("only the Binance public market source is implemented")
     snapshot = (
         load_dataset(dataset)
         if dataset
-        else CompositeDataSource(timeout=config.data.request_timeout_seconds).snapshot(
-            symbol, config.data.timeframes, config.data.history_limit
+        else (
+            BinanceMarketData(timeout=config.data.request_timeout_seconds).indicator_snapshot(
+                symbol, config.data.timeframes, config.data.history_limit
+            )
+            if technical_only
+            else CompositeDataSource(timeout=config.data.request_timeout_seconds).snapshot(
+                symbol, config.data.timeframes, config.data.history_limit
+            )
         )
     )
     if external:
@@ -155,6 +173,19 @@ def _live_or_dataset(symbol: str, dataset: str | None, config, external: str | N
             update={"auxiliary": {**snapshot.auxiliary, **load_external_context(external)}}
         )
     return snapshot
+
+
+def _save_technical_report(
+    report: dict[str, Any], output_dir: str | None, format_name: str
+) -> None:
+    if not output_dir:
+        return
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    safe = report["symbol"].replace("/", "-")
+    suffix = "json" if format_name == "json" else "md"
+    content = technical_json(report) if format_name == "json" else technical_markdown(report)
+    (target / f"{safe}-technical.{suffix}").write_text(content, encoding="utf-8")
 
 
 def _run_research(command: str, snapshot, config, profile: str):
@@ -178,6 +209,20 @@ def main(argv: list[str] | None = None) -> int:
         if not symbol:
             raise SystemExit("analyze requires a symbol")
         config = _config(args, symbol)
+        if args.technical_only and args.external_data:
+            raise SystemExit("--external-data is not used with --technical-only")
+        if args.technical_only:
+            technical = analyze_technical_snapshot(
+                _live_or_dataset(symbol, args.dataset, config, technical_only=True), config
+            )
+            selected = set(args.horizons)
+            technical["horizons"] = {
+                key: value for key, value in technical["horizons"].items() if key in selected
+            }
+            output = technical_json(technical) if args.format == "json" else technical_markdown(technical)
+            print(output)
+            _save_technical_report(technical, args.output_dir or config.output.output_dir, args.format)
+            return 0
         report = analyze_snapshot(
             _live_or_dataset(symbol, args.dataset, config, args.external_data), config, args.profile
         )

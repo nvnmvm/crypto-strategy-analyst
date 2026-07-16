@@ -21,11 +21,13 @@ OpenClaw owns symbol selection, scheduling, alert deduplication, follow-up timin
 7. Respect structural stops, resistance-aware targets and the configured minimum reward/risk. Downgrade insufficient space to `watch`.
 8. Return schema 3.0 JSON or concise Chinese Markdown, including data availability, scores, levels, horizon plans, warnings, limitations and OpenClaw events.
    Include the per-timeframe `market.technical_analysis` panel: EMA/SMA alignment, RSI state, MACD line/signal/histogram state, confluence score and directional votes. Treat overbought/oversold as observations, never standalone orders.
+9. For low-token technical-only requests, call `analyze --technical-only`. Fetch public Binance candles once per timeframe, calculate EMA/MA/RSI/MACD/ATR and volume internally, and return only the final closed-candle snapshot. Do not add auxiliary data, patterns, levels, raw candles, price plans, or execution.
 
 ## Commands
 
 ```bash
 crypto-strategy-analyst analyze BTC/USDT --horizons short swing long --format json
+crypto-strategy-analyst analyze BTC/USDT --technical-only --format markdown
 crypto-strategy-analyst compare BTC/USDT ETH/USDT SOL/USDT
 crypto-strategy-analyst validate-entry ./outputs/BTC-USDT-report.json --dataset ./data/BTC-USDT --horizon swing
 crypto-strategy-analyst fetch-dataset BTC/USDT ./data/BTC-USDT

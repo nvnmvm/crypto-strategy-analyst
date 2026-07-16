@@ -62,6 +62,62 @@ class BinanceMarketData(MarketDataSource):
             ),
         )
 
+    def indicator_snapshot(
+        self,
+        symbol: str,
+        timeframes: list[str],
+        limit: int = 500,
+        as_of: datetime | None = None,
+    ) -> MarketSnapshot:
+        """Fetch only closed public klines for compact technical analysis.
+
+        The indicator-only path has no need for a live ticker, exchange rules, or
+        auxiliary endpoints.  Its reported price is therefore the most recently
+        closed candle, keeping the indicator values and reference price aligned.
+        """
+
+        normalized = normalize_symbol(symbol)
+        now = (as_of or datetime.now(UTC)).astimezone(UTC)
+        candles: dict[str, list[Candle]] = {}
+        for timeframe in timeframes:
+            rows = self._get(
+                "/api/v3/klines", {"symbol": normalized, "interval": timeframe, "limit": limit}
+            )
+            candles[timeframe] = [
+                candle
+                for row in rows
+                if (
+                    candle := Candle(
+                        open_time=datetime.fromtimestamp(row[0] / 1000, UTC),
+                        close_time=datetime.fromtimestamp((row[6] + 1) / 1000, UTC),
+                        open=float(row[1]),
+                        high=float(row[2]),
+                        low=float(row[3]),
+                        close=float(row[4]),
+                        volume=float(row[5]),
+                    )
+                ).close_time <= now
+            ]
+        latest = max(
+            (bar for bars in candles.values() for bar in bars),
+            key=lambda bar: bar.close_time,
+            default=None,
+        )
+        if latest is None:
+            raise ValueError("no closed candles available for indicator analysis")
+        return MarketSnapshot(
+            symbol=display_symbol(symbol),
+            as_of=now,
+            price=latest.close,
+            candles=candles,
+            trading_rules=DataPoint(
+                status=Availability.NOT_AVAILABLE,
+                source="not_required_for_technical_indicators",
+                observed_at=now,
+                freshness_seconds=0,
+            ),
+        )
+
     def history(
         self,
         symbol: str,

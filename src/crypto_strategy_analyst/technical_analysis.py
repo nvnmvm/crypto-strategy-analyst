@@ -88,6 +88,7 @@ def analyze_indicator_set(
     )
     score = float(np.clip(50 + score_delta, 0, 100))
     return {
+        "close": indicator.close,
         "bias": bias,
         "confluence_score": score,
         "bullish_votes": bullish_votes,
@@ -116,6 +117,20 @@ def analyze_indicator_set(
             "histogram": indicator.macd_histogram,
             "histogram_change": indicator.macd_histogram_change,
             "state": macd_state,
+        },
+        "atr": {
+            "period": config.atr_period,
+            "value": indicator.atr,
+            "percent": indicator.atr_percent,
+        },
+        "volume": {
+            "period": config.volume_period,
+            "ratio": indicator.volume_ratio,
+            "state": "expanding"
+            if indicator.volume_ratio >= 1.15
+            else "contracting"
+            if indicator.volume_ratio < 0.85
+            else "normal",
         },
     }
 

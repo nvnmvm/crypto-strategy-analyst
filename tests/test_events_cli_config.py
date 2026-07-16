@@ -28,6 +28,7 @@ def test_analyze_supports_position_or_option():
     parser = build_parser()
     assert parser.parse_args(["analyze", "BTC/USDT"]).symbol == "BTC/USDT"
     assert parser.parse_args(["analyze", "--symbol", "ETH/USDT"]).symbol_option == "ETH/USDT"
+    assert parser.parse_args(["analyze", "BTC/USDT", "--technical-only"]).technical_only
 
 
 def test_research_commands_are_complete():
